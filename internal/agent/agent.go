@@ -239,12 +239,12 @@ func NewAgent(client ai.LLMClient, system string) *Agent {
 // Run executes a user request, streaming events through onEvent.
 // It returns after the reply completes or an error occurs.
 func (a *Agent) Run(ctx context.Context, input string, onEvent func(Event)) error {
-	a.RunWithAttachments(ctx, input, nil, onEvent)
+	a.RunWithAttachments(ctx, input, nil, func(e Event) error { onEvent(e); return nil })
 	return nil
 }
 
 // RunWithAttachments 执行请求并附带多模态附件（图片/文件）。
-func (a *Agent) RunWithAttachments(ctx context.Context, input string, attachments []ai.Attachment, onEvent func(Event)) error {
+func (a *Agent) RunWithAttachments(ctx context.Context, input string, attachments []ai.Attachment, onEvent func(Event) error) error {
 	if a.TraceID == "" {
 		a.TraceID = logx.NewTraceID()
 	}
@@ -341,7 +341,7 @@ func (a *Agent) permissionMode(tool string) string {
 }
 
 // runTool 执行单个工具，先做权限检查；支持迭代式自动重试。
-func (a *Agent) runTool(ctx context.Context, tc ai.ToolCall, onEvent func(Event)) (string, error) {
+func (a *Agent) runTool(ctx context.Context, tc ai.ToolCall, onEvent func(Event) error) (string, error) {
 	switch a.permissionMode(tc.Function.Name) {
 	case "deny":
 		return "已拒绝执行 " + tc.Function.Name + "（权限配置为禁止）", nil

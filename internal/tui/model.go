@@ -6,11 +6,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"licode/internal/agent"
+	"licode/internal/settings"
 )
 
-// Model 是 TUI 主模型。
+// Msg 类型
+type eventMsg agent.Event
+
+// Model 是 TUI 主模型
 type Model struct {
 	backend *Backend
 	width   int
@@ -18,9 +22,9 @@ type Model struct {
 
 	// 聊天
 	messages []agent.Event
+	input    string
 
-	// 输入
-	input     string
+	// 历史
 	history   []string
 	histIndex int
 
@@ -28,12 +32,17 @@ type Model struct {
 	running bool
 	busy    bool
 
-	// 会话
+	// 面板
 	showSessions bool
+	showSettings bool
 	sessions     []sessionInfo
 	sessSelected int
+	settingField int
 
-	// 事件通道（从 goroutine 接收）
+	// 设置字段名（用于编辑）
+	settingKeys []string
+
+	// 事件通道
 	eventCh chan agent.Event
 }
 
@@ -44,7 +53,15 @@ type sessionInfo struct {
 }
 
 func NewModel(backend *Backend) *Model {
-	return &Model{backend: backend, eventCh: make(chan agent.Event, 128)}
+	return &Model{
+		backend: backend,
+		eventCh: make(chan agent.Event, 128),
+		sessions: make([]sessionInfo, 0, 8),
+		settingKeys: []string{
+			"provider", "model", "base_url", "api_key",
+			"temperature", "max_tokens", "max_iterations",
+		},
+	}
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -61,15 +78,15 @@ func (m *Model) refreshSessions() {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
+	switch v := msg.(type) {
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		return m.handleKey(v)
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-	case agent.Event:
-		m.messages = append(m.messages, msg)
-		if msg.Type == agent.EventDone || msg.Type == agent.EventError {
+		m.width = v.Width
+		m.height = v.Height
+	case eventMsg:
+		m.messages = append(m.messages, agent.Event(v))
+		if v.Type == agent.EventDone || v.Type == agent.EventError {
 			m.busy = false
 			m.running = false
 		}
@@ -78,10 +95,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.showSessions {
-		return m.handleSessionKeys(msg)
+	// 设置面板优先
+	if m.showSettings {
+		return m.handleSettings(msg)
 	}
-
+	// 会话面板
+	if m.showSessions {
+		return m.handleSessions(msg)
+	}
+	// 主聊天视图
 	switch msg.String() {
 	case "ctrl+c":
 		if m.running {
@@ -92,6 +114,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.showSessions = true
 		m.refreshSessions()
+		return m, nil
+	case "`":
+		m.showSettings = true
 		return m, nil
 	case "enter":
 		return m.sendInput()
@@ -128,7 +153,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleSessionKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleSessions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "tab", "q", "esc":
 		m.showSessions = false
@@ -163,6 +188,31 @@ func (m *Model) handleSessionKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "`", "q", "esc":
+		m.showSettings = false
+	case "j", "down":
+		if m.settingField < len(m.settingKeys)-1 {
+			m.settingField++
+		}
+	case "k", "up":
+		if m.settingField > 0 {
+			m.settingField--
+		}
+	case "enter":
+		m.editSetting()
+	}
+	return m, nil
+}
+
+func (m *Model) editSetting() {
+	key := m.settingKeys[m.settingField]
+	s := m.backend.Settings()
+	current := settingValue(s, key)
+	m.input = fmt.Sprintf("/set %s %s", key, current)
+}
+
 func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
@@ -171,6 +221,22 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 	m.history = append(m.history, text)
 	m.histIndex = -1
 	m.input = ""
+
+	// 处理 /set 命令
+	if strings.HasPrefix(text, "/set ") {
+		parts := strings.SplitN(text, " ", 3)
+		if len(parts) == 3 {
+			m.backend.UpdateSettings(func(s *settings.Settings) {
+				updateSettingField(s, parts[1], parts[2])
+			})
+			m.backend.RefreshClients()
+			m.messages = append(m.messages, agent.Event{
+				Type:    agent.EventText,
+				Content: fmt.Sprintf("⚙️ 已更新设置: %s = %s", parts[1], parts[2]),
+			})
+		}
+		return m, nil
+	}
 
 	// 添加用户消息
 	m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: "你: " + text})
@@ -183,18 +249,16 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.running = true
 
-	// 启动 goroutine 收集事件到 channel
 	go func() {
 		for e := range events {
 			m.eventCh <- e
 		}
 	}()
 
-	// 返回 tick cmd 轮询事件
 	return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 		select {
 		case e := <-m.eventCh:
-			return e
+			return eventMsg(e)
 		default:
 			return nil
 		}
@@ -205,17 +269,16 @@ func (m *Model) View() string {
 	if m.showSessions {
 		return m.viewSessions()
 	}
+	if m.showSettings {
+		return m.viewSettings()
+	}
 	return m.viewChat()
 }
 
 func (m *Model) viewChat() string {
 	var b strings.Builder
+	b.WriteString(titleStyle.Render(" licode TUI ") + "\n")
 
-	// 标题
-	b.WriteString(titleStyle.Render(" licode TUI "))
-	b.WriteString("\n")
-
-	// 聊天区域
 	chatH := m.height - 6
 	if chatH < 3 {
 		chatH = 3
@@ -226,31 +289,20 @@ func (m *Model) viewChat() string {
 		lines = lines[len(lines)-chatH:]
 	}
 	for _, l := range lines {
-		b.WriteString(l)
-		b.WriteString("\n")
+		b.WriteString(l + "\n")
 	}
-
-	// 填充空白
 	for i := len(lines); i < chatH; i++ {
 		b.WriteString("\n")
 	}
 
-	// 分隔线
-	b.WriteString(strings.Repeat("─", m.width))
-	b.WriteString("\n")
-
-	// 状态栏
-	b.WriteString(m.viewStatus())
-	b.WriteString("\n")
-
-	// 输入框
+	b.WriteString(strings.Repeat("─", m.width) + "\n")
+	b.WriteString(m.viewStatus() + "\n")
 	b.WriteString("› ")
 	if m.input == "" {
-		b.WriteString(helpStyle.Render("输入消息，Enter 发送，Tab 切换会话..."))
+		b.WriteString(helpStyle.Render("输入消息，Enter 发送，Tab 会话，` 设置，Ctrl+C 退出..."))
 	} else {
 		b.WriteString(m.input)
 	}
-
 	return b.String()
 }
 
@@ -273,7 +325,7 @@ func (m *Model) renderMessages() string {
 			}
 			lines = append(lines, toolStyle.Render(fmt.Sprintf("✅ %s → %s", evt.ToolName, out)))
 		case agent.EventError:
-			lines = append(lines, errorStyle.Render("错误: "+evt.Error))
+			lines = append(lines, errorStyle.Render("❌ "+evt.Error))
 		case agent.EventStatus:
 			lines = append(lines, statusStyle.Render(evt.Content))
 		}
@@ -299,8 +351,7 @@ func (m *Model) viewStatus() string {
 
 func (m *Model) viewSessions() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(" 会话列表 "))
-	b.WriteString("\n\n")
+	b.WriteString(titleStyle.Render(" 会话列表 ") + "\n\n")
 	for i, s := range m.sessions {
 		style := baseStyle
 		if i == m.sessSelected {
@@ -310,10 +361,23 @@ func (m *Model) viewSessions() string {
 		if len(title) > 20 {
 			title = title[:20] + "…"
 		}
-		b.WriteString(style.Render(fmt.Sprintf(" %s (%d 条)", title, s.count)))
-		b.WriteString("\n")
+		b.WriteString(style.Render(fmt.Sprintf(" %s (%d 条)", title, s.count)) + "\n")
 	}
-	b.WriteString("\n")
-	b.WriteString(helpStyle.Render(" j/k 移动 · enter 切换 · n 新建 · d 删除 · tab 返回"))
+	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 切换 · n 新建 · d 删除 · tab/` 返回"))
+	return b.String()
+}
+
+func (m *Model) viewSettings() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(" 设置 ") + "\n\n")
+	for i, key := range m.settingKeys {
+		style := baseStyle
+		if i == m.settingField {
+			style = selectedStyle
+		}
+		val := settingValue(m.backend.Settings(), key)
+		b.WriteString(style.Render(fmt.Sprintf(" %-16s %s", key+":", val)) + "\n")
+	}
+	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 编辑 · ` 关闭"))
 	return b.String()
 }

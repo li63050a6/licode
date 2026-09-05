@@ -751,7 +751,7 @@ func runServerAgentWithAttachments(ctx context.Context, st *serverState, cs *con
 		}
 	}
 	var textBuf strings.Builder
-	_ = ag.RunWithAttachments(ctx, content, attachments, func(e agent.Event) {
+	_ = ag.RunWithAttachments(ctx, content, attachments, func(e agent.Event) error {
 		if e.Type == agent.EventText && !stream {
 			textBuf.WriteString(e.Content)
 		} else if e.Type == agent.EventText {
@@ -774,6 +774,7 @@ func runServerAgentWithAttachments(ctx context.Context, st *serverState, cs *con
 		} else if e.Type == agent.EventStatus {
 			c.SendEvent(websocket.ServerEvent{Type: websocket.EvtStatus, Content: e.Content})
 		}
+		return nil
 	})
 }
 
