@@ -45,19 +45,20 @@ func (m *Model) View() string {
 
 // ── 首页（logo + 居中 Prompt） ──
 
-var logoLeft = []string{
-	"                   ",
-	"█▀▀█ █▀▀█ █▀▀█ █▀▀▄",
-	"█__█ █__█ █^^^ █__█",
-	"▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀",
+// "LiCode" 字标：6 个大写字母，每个 3 列宽，Li 用 accent，Code 用正文色
+var logoFont = [][]string{
+	{"█  ", "█  ", "█▀▀"}, // L
+	{"▀▀▀", " █ ", "▀▀▀"}, // I
+	{"▀▀▀", "█  ", "▀▀▀"}, // C
+	{"▀▀▀", "█ █", "▀▀▀"}, // O
+	{"▀▀▀", "█ █", "█▀▀"}, // D
+	{"▀▀▀", "█▀▀", "▀▀▀"}, // E
 }
 
-var logoRight = []string{
-	"             ▄     ",
-	"█▀▀▀ █▀▀█ █▀▀█ █▀▀█",
-	"█___ █__█ █__█ █^^^",
-	"▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
-}
+var logoColors = []string{colorAccent, colorAccent, colorText, colorText, colorText, colorText}
+
+// 顶部装饰像素（悬在 O 上方）
+var logoAdorn = strings.Repeat(" ", 12) + "▄" + strings.Repeat(" ", 10)
 
 func (m *Model) viewHome() string {
 	w := m.w
@@ -66,7 +67,7 @@ func (m *Model) viewHome() string {
 	}
 	var lines []string
 
-	content := len(logoLeft) + 1 + 1 + len(m.promptLines(0)) // logo + <height1/> + wrapper paddingTop + Prompt
+	content := len(logoFont[0]) + 2 + len(m.promptLines(0)) // logo行 + <height1/> + wrapper paddingTop + Prompt
 	top := (m.h - content) / 2
 	if top < 0 {
 		top = 0
@@ -74,12 +75,15 @@ func (m *Model) viewHome() string {
 	for i := 0; i < top; i++ {
 		lines = append(lines, blankLine(w, colorBg))
 	}
-	for i := 0; i < len(logoLeft); i++ {
+	for i := 0; i < len(logoFont[0])+1; i++ {
 		lines = append(lines, m.logoLine(i)...)
 	}
 	lines = append(lines, blankLine(w, colorBg)) // <box height={1}/>
 	lines = append(lines, blankLine(w, colorBg)) // 包装盒 paddingTop
-	lines = append(lines, m.promptLines(w)...)
+	pw := min(w, max(75, w*7/10))
+	for _, ln := range m.promptLines(pw) {
+		lines = append(lines, centerLine(ln, w))
+	}
 	for i := top + content; i < m.h; i++ {
 		lines = append(lines, blankLine(w, colorBg))
 	}
@@ -89,14 +93,28 @@ func (m *Model) viewHome() string {
 	return joinLines(lines)
 }
 
+func centerLine(s string, w int) string {
+	sw := lipgloss.Width(s)
+	pad := max(0, (w-sw)/2)
+	tail := max(0, w-pad-sw)
+	if pad == 0 && tail == 0 {
+		return s
+	}
+	return lipgloss.NewStyle().Background(lipgloss.Color(colorBg)).Render(strings.Repeat(" ", pad)) + s +
+		lipgloss.NewStyle().Background(lipgloss.Color(colorBg)).Render(strings.Repeat(" ", tail))
+}
+
 func (m *Model) logoLine(i int) []string {
 	var b strings.Builder
-	for _, ch := range logoLeft[i] {
-		b.WriteString(logoGlyph(ch, colorMuted, false))
-	}
-	b.WriteString(" ")
-	for _, ch := range logoRight[i] {
-		b.WriteString(logoGlyph(ch, colorText, true))
+	if i == 0 {
+		b.WriteString(logoAdorn)
+	} else {
+		for j, glyph := range logoFont {
+			if j > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(logoGlyphRow(glyph[i-1], logoColors[j]))
+		}
 	}
 	text := b.String()
 	pad := max(0, (m.w-lipgloss.Width(text))/2)
@@ -107,26 +125,21 @@ func (m *Model) logoLine(i int) []string {
 	}
 }
 
-// logoGlyph 复刻 opencode logo.tsx 的逐字符渲染：
-// _ → fg+shadow 底的空格；^ → fg+shadow 底的 ▀；~ → shadow 色的 ▀；, → shadow 色的 ▄；其余原样。
-func logoGlyph(ch rune, fg string, bold bool) string {
-	sh := shadowOf(fg)
-	base := lipgloss.NewStyle()
-	if bold {
-		base = base.Bold(true)
+// logoGlyphRow 复刻 opencode logo 的笔触：字形内空格上阴影色，笔画用前景色
+func logoGlyphRow(glyph, fg string) string {
+	var b strings.Builder
+	for _, ch := range glyph {
+		switch ch {
+		case ' ':
+			b.WriteString(lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color(fg)).
+				Background(lipgloss.Color(shadowOf(fg))).Render(" "))
+		default:
+			b.WriteString(lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color(fg)).Render(string(ch)))
+		}
 	}
-	switch ch {
-	case '_':
-		return base.Foreground(lipgloss.Color(fg)).Background(lipgloss.Color(sh)).Render(" ")
-	case '^':
-		return base.Foreground(lipgloss.Color(fg)).Background(lipgloss.Color(sh)).Render("▀")
-	case '~':
-		return base.Foreground(lipgloss.Color(sh)).Render("▀")
-	case ',':
-		return base.Foreground(lipgloss.Color(sh)).Render("▄")
-	default:
-		return base.Foreground(lipgloss.Color(fg)).Render(string(ch))
-	}
+	return b.String()
 }
 
 // ── 会话视图 ──
@@ -188,11 +201,11 @@ func (m *Model) promptLines(w int) []string {
 	return []string{
 		blankLine(w, colorBg),      // 聊天列 gap
 		elementPadLine(w),          // prompt 内盒 paddingTop
-		m.renderInputLine(),        // 输入行
+		m.renderInputLine(w),       // 输入行
 		elementPadLine(w),          // 元信息行 paddingTop
-		m.renderMetaLine(),         // 元信息行
-		m.renderSeparator(),        // ╹ + ▀
-		m.renderStatusLine(),       // 状态行（含左框 ▍）
+		m.renderMetaLine(w),        // 元信息行
+		m.renderSeparator(w),       // ╹ + ▀
+		m.renderStatusLine(w),      // 状态行（含左框 ▍）
 		blankLine(w, colorBg),      // 容器 paddingBottom
 	}
 }
@@ -647,10 +660,10 @@ func bgForSelected(i, sel int) string {
 // ── 底部 Prompt ──
 
 // 输入行（leader=以 / 开头时用 muted 色；空时显示占位符）
-func (m *Model) renderInputLine() string {
+func (m *Model) renderInputLine(w int) string {
 	bor := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(borderChar)
 	prefix := "  " + bor + "  "
-	avail := m.w - lipgloss.Width(prefix) - 2
+	avail := w - lipgloss.Width(prefix) - 2
 	if avail < 1 {
 		avail = 1
 	}
@@ -686,27 +699,27 @@ func (m *Model) placeholder() string {
 }
 
 // 元信息行：agent · model provider
-func (m *Model) renderMetaLine() string {
+func (m *Model) renderMetaLine(w int) string {
 	bor := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(borderChar)
 	prefix := "  " + bor + "  "
 	agent := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(m.mode.String())
 	sep := mutedStyle.Render(" · ")
 	model := textStyle.Render(m.modelName())
 	text := agent + sep + model
-	avail := m.w - lipgloss.Width(prefix) - 2
+	avail := w - lipgloss.Width(prefix) - 2
 	fill := lipgloss.NewStyle().Background(lipgloss.Color(colorElement)).Render(text + strings.Repeat(" ", max(1, avail-lipgloss.Width(text))))
 	return prefix + fill + "  "
 }
 
 // 分隔线：╹(left) + ▀ 填充（backgroundElement 色）
-func (m *Model) renderSeparator() string {
+func (m *Model) renderSeparator(w int) string {
 	prefix := "  " + lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render("╹")
-	fill := lipgloss.NewStyle().Foreground(lipgloss.Color(colorElement)).Render(strings.Repeat("▀", max(0, m.w-3)))
+	fill := lipgloss.NewStyle().Foreground(lipgloss.Color(colorElement)).Render(strings.Repeat("▀", max(0, w-3)))
 	return prefix + fill
 }
 
 // 状态行：左 cwd / 运行中 spinner+esc interrupt；右 快捷键
-func (m *Model) renderStatusLine() string {
+func (m *Model) renderStatusLine(w int) string {
 	bor := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(borderChar)
 	prefix := "  " + bor
 	var left string
@@ -725,7 +738,7 @@ func (m *Model) renderStatusLine() string {
 	right := textStyle.Render("a") + mutedStyle.Render(" agents") + "  " +
 		textStyle.Render("Ctrl+p") + mutedStyle.Render(" commands")
 
-	pad := m.w - lipgloss.Width(prefix+left) - lipgloss.Width(right)
+	pad := w - lipgloss.Width(prefix+left) - lipgloss.Width(right)
 	if pad < 1 {
 		pad = 1
 	}

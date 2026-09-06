@@ -11,7 +11,7 @@ import (
 	"licode/internal/ai"
 )
 
-const Version = "0.0.44"
+const Version = "0.0.45"
 
 type lipglossColor = string
 
