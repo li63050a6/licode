@@ -35,6 +35,20 @@ func (m Mode) String() string {
 	return "BUILD"
 }
 
+type message struct {
+	role    string // "user" | "assistant" | "system"
+	content string
+	isTool  bool
+	tool    string
+	args    string
+	output  string
+	isThought bool
+	thought string
+	isHeading bool
+	heading  string
+	isExpand  bool
+}
+
 type Model struct {
 	backend *Backend
 	width   int
@@ -42,7 +56,7 @@ type Model struct {
 
 	mode Mode
 
-	messages []agent.Event
+	messages []message
 	input    string
 
 	history   []string
@@ -81,9 +95,12 @@ type sessionInfo struct {
 
 func NewModel(backend *Backend) *Model {
 	return &Model{
-		backend:            backend,
-		mode:               ModeBuild,
-		eventCh:            make(chan agent.Event, 128),
+		backend: backend,
+		mode:    ModeBuild,
+		eventCh: make(chan agent.Event, 128),
+		messages: []message{
+			{role: "assistant", content: "欢迎使用 licode！输入 /help 查看可用命令。"},
+		},
 		sessions:           make([]sessionInfo, 0, 8),
 		slashResults:       make([]SlashCommand, 0),
 		commands:           buildCommands(),
@@ -104,6 +121,18 @@ func buildCommands() []SlashCommand {
 		{Name: "/clear", Description: "清空当前对话", Category: "session"},
 		{Name: "/sessions", Description: "打开会话面板", Category: "session"},
 		{Name: "/set", Description: "打开设置面板", Category: "settings"},
+		{Name: "/plan", Description: "切换到 Plan 只读模式", Category: "action", Action: func(m *Model) {
+			if m.mode == ModeBuild {
+				m.mode = ModePlan
+				setStatus(m, "PLAN 模式：AI 仅思考，不会执行写入操作")
+			}
+		}},
+		{Name: "/build", Description: "切换到 Build 可执行模式", Category: "action", Action: func(m *Model) {
+			if m.mode == ModePlan {
+				m.mode = ModeBuild
+				setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
+			}
+		}},
 		{Name: "/help", Description: "显示帮助", Category: "action"},
 	}
 }
@@ -129,13 +158,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = v.Width
 		m.height = v.Height
 	case eventMsg:
-		m.messages = append(m.messages, agent.Event(v))
-		if v.Type == agent.EventDone || v.Type == agent.EventError {
-			m.busy = false
-			m.running = false
-		}
+		m.handleEvent(agent.Event(v))
 	}
 	return m, nil
+}
+
+func (m *Model) handleEvent(e agent.Event) {
+	switch e.Type {
+	case agent.EventText:
+		m.messages = append(m.messages, message{role: "assistant", content: e.Content})
+	case agent.EventToolStart:
+		m.messages = append(m.messages, message{isTool: true, tool: e.ToolName, args: e.ToolArgs})
+	case agent.EventToolDone:
+		// 更新对应工具的 output
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			if m.messages[i].isTool && m.messages[i].tool == e.ToolName && m.messages[i].output == "" {
+				m.messages[i].output = e.ToolOut
+				break
+			}
+		}
+	case agent.EventDone, agent.EventError:
+		m.busy = false
+		m.running = false
+	}
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -166,7 +211,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.mode == ModeBuild {
 			m.mode = ModePlan
-			setStatus(m, "PLAN 模式：AI 仅思考，不会执行任何工具")
+			setStatus(m, "PLAN 模式：AI 仅思考，不会执行写入操作")
 		} else {
 			m.mode = ModeBuild
 			setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
@@ -308,21 +353,23 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 			"  /clear          清空对话",
 			"  /sessions       打开会话面板",
 			"  /set            打开设置面板",
+			"  /plan           切换到 Plan 只读模式",
+			"  /build          切换到 Build 可执行模式",
 			"  /help           显示此帮助",
 			"",
 			"模式说明：",
 			"  BUILD（默认）    AI 可执行所有工具",
 			"  PLAN             AI 只读模式（搜索/查看，不写入）",
-			"  按 Tab 切换模式",
+			"  按 Tab 切换模式，禁用的工具可在设置中配置",
 			"",
 			"快捷键：",
-			"  Tab      切换 BUILD/PLAN 模式",
+			"  Tab      切换 BUILD/PLAN",
 			"  Ctrl+C   停止/退出（连按两次）",
-			"  上下键   历史翻动/菜单选择",
-			"  Enter    发送/确认选择",
-			"  Esc      关闭菜单/面板",
+			"  上下键   历史/菜单",
+			"  Enter    发送/确认",
+			"  Esc      关闭菜单",
 		}, "\n")
-		m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: help})
+		m.messages = append(m.messages, message{role: "assistant", content: help})
 	}
 }
 
@@ -407,15 +454,12 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 				m.planModeExclusions = val
 			}
 			m.backend.RefreshClients()
-			m.messages = append(m.messages, agent.Event{
-				Type:    agent.EventText,
-				Content: fmt.Sprintf("已更新: %s = %s", field, val),
-			})
+			m.messages = append(m.messages, message{role: "assistant", content: fmt.Sprintf("已更新: %s = %s", field, val)})
 		}
 		return m, nil
 	}
 
-	m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: text})
+	m.messages = append(m.messages, message{role: "user", content: text})
 
 	userMsg := text
 	if m.mode == ModePlan && m.planModeExclusions != "" {
@@ -424,7 +468,7 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 
 	events, err := m.backend.RunAgent(context.Background(), userMsg)
 	if err != nil {
-		m.messages = append(m.messages, agent.Event{Type: agent.EventError, Content: err.Error()})
+		m.messages = append(m.messages, message{role: "assistant", content: fmt.Sprintf("错误: %s", err.Error())})
 		return m, nil
 	}
 	m.busy = true
@@ -463,21 +507,21 @@ func (m *Model) viewChat() string {
 	b.WriteString(m.viewTopBar())
 	b.WriteString("\n")
 
-	// 对话内容区（占满上方，纯文本，无边框）
+	// 对话内容区
 	chatH := m.height - 3
 	if chatH < 3 {
 		chatH = 3
 	}
 	msgStr := m.renderMessages()
-	lines := strings.Split(msgStr, "\n")
-	if len(lines) > chatH {
-		lines = lines[len(lines)-chatH:]
+	contentLines := strings.Split(msgStr, "\n")
+	if len(contentLines) > chatH {
+		contentLines = contentLines[len(contentLines)-chatH:]
 	}
-	for _, l := range lines {
+	for _, l := range contentLines {
 		b.WriteString(l)
 		b.WriteString("\n")
 	}
-	for i := len(lines); i < chatH; i++ {
+	for i := len(contentLines); i < chatH; i++ {
 		b.WriteString("\n")
 	}
 
@@ -504,23 +548,26 @@ func (m *Model) viewTopBar() string {
 
 func (m *Model) renderMessages() string {
 	var msgs []string
-	for _, evt := range m.messages {
-		switch evt.Type {
-		case agent.EventText:
-			// 纯文本，无前缀
-			msgs = append(msgs, evt.Content)
-		case agent.EventToolStart:
-			msgs = append(msgs, toolStyle.Render(fmt.Sprintf("$ %s(%s)", evt.ToolName, evt.ToolArgs)))
-		case agent.EventToolDone:
-			out := evt.ToolOut
-			if len(out) > 100 {
-				out = out[:100] + "..."
+	for _, msg := range m.messages {
+		switch {
+		case msg.isTool:
+			toolLine := fmt.Sprintf("$ %s(%s)", msg.tool, msg.args)
+			if msg.output != "" {
+				out := msg.output
+				if len(out) > 100 {
+					out = out[:100] + "..."
+				}
+				toolLine += fmt.Sprintf("\n  -> %s", out)
 			}
-			msgs = append(msgs, toolStyle.Render(fmt.Sprintf("  -> %s", out)))
-		case agent.EventError:
-			msgs = append(msgs, errorStyle.Render("错误: "+evt.Error))
-		case agent.EventStatus:
-			msgs = append(msgs, statusStyle.Render(evt.Content))
+			msgs = append(msgs, toolStyle.Render(toolLine))
+		case msg.isThought:
+			msgs = append(msgs, statusStyle.Render("+ Thought: "+msg.thought))
+		case msg.isHeading:
+			msgs = append(msgs, "# "+msg.heading)
+		case msg.isExpand:
+			msgs = append(msgs, statusStyle.Render(msg.content))
+		default:
+			msgs = append(msgs, msg.content)
 		}
 	}
 	return strings.Join(msgs, "\n")
@@ -533,7 +580,7 @@ func (m *Model) viewStatusBar() string {
 	}
 	size := "1.2 MB"
 	tip := "Ctrl+p commands"
-	ver := "0.0.36"
+	ver := "0.0.40"
 	return dir + "  " + size + "  " + tip + "  " + "LiCode " + ver
 }
 
