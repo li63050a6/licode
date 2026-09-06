@@ -11,7 +11,7 @@ import (
 	"licode/internal/ai"
 )
 
-const Version = "0.0.45"
+const Version = "0.0.46"
 
 type lipglossColor = string
 
@@ -81,8 +81,8 @@ type Model struct {
 	backend *Backend
 	w, h    int
 
-	home bool
-	mode Mode
+	home  bool
+	mode  Mode
 	lines []line
 
 	basePath string
@@ -266,6 +266,16 @@ func (m *Model) keyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingOpen = false
 		}
 		return m, nil
+	case "ctrl+p":
+		if !m.busy {
+			if m.cmdMenu {
+				m.cmdMenu = false
+				m.input = ""
+			} else {
+				m.openCmdMenu()
+			}
+		}
+		return m, nil
 	case "enter":
 		if m.cmdMenu {
 			if m.cmdIdx < len(m.cmdItems) {
@@ -314,8 +324,12 @@ func (m *Model) keyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cmdMenu = false
 		return m, nil
 	default:
-		if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
-			m.input += string(msg.Runes[0])
+		switch {
+		case msg.Type == tea.KeyRunes && len(msg.Runes) > 0:
+			m.input += string(msg.Runes)
+			m.updateCmdMenu()
+		case msg.Type == tea.KeySpace:
+			m.input += " "
 			m.updateCmdMenu()
 		}
 	}
@@ -408,6 +422,13 @@ func (m *Model) updateCmdMenu() {
 		m.cmdItems = items
 		m.cmdIdx = 0
 	}
+}
+
+// openCmdMenu 由 Ctrl+p 触发，复用 "/" 命令菜单（显示全部命令）。
+func (m *Model) openCmdMenu() {
+	m.cmdMenu = true
+	m.input = "/"
+	m.updateCmdMenu()
 }
 
 // ── 发送 ──

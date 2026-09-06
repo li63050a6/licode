@@ -57,9 +57,6 @@ var logoFont = [][]string{
 
 var logoColors = []string{colorAccent, colorAccent, colorText, colorText, colorText, colorText}
 
-// 顶部装饰像素（悬在 O 上方）
-var logoAdorn = strings.Repeat(" ", 12) + "▄" + strings.Repeat(" ", 10)
-
 func (m *Model) viewHome() string {
 	w := m.w
 	if w < 10 {
@@ -75,7 +72,7 @@ func (m *Model) viewHome() string {
 	for i := 0; i < top; i++ {
 		lines = append(lines, blankLine(w, colorBg))
 	}
-	for i := 0; i < len(logoFont[0])+1; i++ {
+	for i := 0; i < len(logoFont[0]); i++ {
 		lines = append(lines, m.logoLine(i)...)
 	}
 	lines = append(lines, blankLine(w, colorBg)) // <box height={1}/>
@@ -87,10 +84,44 @@ func (m *Model) viewHome() string {
 	for i := top + content; i < m.h; i++ {
 		lines = append(lines, blankLine(w, colorBg))
 	}
+	if m.cmdMenu {
+		m.overlayHomeMenu(lines, top+content)
+	}
 	if m.toast != "" && top >= 1 {
 		lines[1] = m.toastLine()
 	}
 	return joinLines(lines)
+}
+
+// overlayHomeMenu 在首页底部垫高层叠置 "/" 命令菜单（不改变 logo/Prompt 布局）。
+func (m *Model) overlayHomeMenu(lines []string, base int) {
+	n := len(m.cmdItems)
+	if n > 7 {
+		n = 7
+	}
+	if n == 0 {
+		return
+	}
+	for i := 0; i < n; i++ {
+		idx := len(lines) - 1 - i
+		if idx <= base {
+			return
+		}
+		c := m.cmdItems[i]
+		color := colorMuted
+		if i == m.cmdIdx {
+			color = colorAccent
+		}
+		sel := "  "
+		if i == m.cmdIdx {
+			sel = "▍"
+		}
+		text := sel + " /" + c.name + "   " + c.title
+		lines[idx] = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(color)).
+			Background(lipgloss.Color(colorBg)).
+			Render(text + strings.Repeat(" ", max(0, m.w-lipgloss.Width(text))))
+	}
 }
 
 func centerLine(s string, w int) string {
@@ -106,15 +137,11 @@ func centerLine(s string, w int) string {
 
 func (m *Model) logoLine(i int) []string {
 	var b strings.Builder
-	if i == 0 {
-		b.WriteString(logoAdorn)
-	} else {
-		for j, glyph := range logoFont {
-			if j > 0 {
-				b.WriteString(" ")
-			}
-			b.WriteString(logoGlyphRow(glyph[i-1], logoColors[j]))
+	for j, glyph := range logoFont {
+		if j > 0 {
+			b.WriteString(" ")
 		}
+		b.WriteString(logoGlyphRow(glyph[i], logoColors[j]))
 	}
 	text := b.String()
 	pad := max(0, (m.w-lipgloss.Width(text))/2)
@@ -199,14 +226,14 @@ func blankLine(w int, bg string) string {
 // Prompt 区块：列间隙 / 内盒留白 / 输入行 / 元信息留白 / 元信息行 / 分隔线 / 状态行 / 容器下留白
 func (m *Model) promptLines(w int) []string {
 	return []string{
-		blankLine(w, colorBg),      // 聊天列 gap
-		elementPadLine(w),          // prompt 内盒 paddingTop
-		m.renderInputLine(w),       // 输入行
-		elementPadLine(w),          // 元信息行 paddingTop
-		m.renderMetaLine(w),        // 元信息行
-		m.renderSeparator(w),       // ╹ + ▀
-		m.renderStatusLine(w),      // 状态行（含左框 ▍）
-		blankLine(w, colorBg),      // 容器 paddingBottom
+		blankLine(w, colorBg), // 聊天列 gap
+		elementPadLine(w),     // prompt 内盒 paddingTop
+		m.renderInputLine(w),  // 输入行
+		elementPadLine(w),     // 元信息行 paddingTop
+		m.renderMetaLine(w),   // 元信息行
+		m.renderSeparator(w),  // ╹ + ▀
+		m.renderStatusLine(w), // 状态行（含左框 ▍）
+		blankLine(w, colorBg), // 容器 paddingBottom
 	}
 }
 

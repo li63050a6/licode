@@ -31,12 +31,12 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 // 供渲染使用的样式（按需构造，避免全局可变状态）
 var (
-	textStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText))
-	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted))
-	warnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorWarning))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorError))
-	accentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent))
-	panelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Background(lipgloss.Color(colorPanel))
+	textStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText))
+	mutedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted))
+	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorWarning))
+	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color(colorError))
+	accentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent))
+	panelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Background(lipgloss.Color(colorPanel))
 	elementStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Background(lipgloss.Color(colorElement))
 )
 
