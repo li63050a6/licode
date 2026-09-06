@@ -26,6 +26,27 @@ const (
 	ModePlan
 )
 
+func (m Mode) String() string {
+	if m == ModePlan {
+		return "PLAN"
+	}
+	return "BUILD"
+}
+
+func (m Mode) Desc() string {
+	if m == ModePlan {
+		return "仅思考，不执行工具（安全预览）"
+	}
+	return "可执行工具（读写文件、运行命令）"
+}
+
+func (m Mode) Color() string {
+	if m == ModePlan {
+		return "#8BE9FD"
+	}
+	return "#50FA7B"
+}
+
 type Model struct {
 	backend *Backend
 	width   int
@@ -55,6 +76,9 @@ type Model struct {
 
 	eventCh  chan agent.Event
 	commands []SlashCommand
+
+	statusMsg    string
+	statusExpiry time.Time
 }
 
 type sessionInfo struct {
@@ -74,6 +98,11 @@ func NewModel(backend *Backend) *Model {
 		commands:     buildCommands(),
 	}
 	return m
+}
+
+func setStatus(m *Model, msg string) {
+	m.statusMsg = msg
+	m.statusExpiry = time.Now().Add(5 * time.Second)
 }
 
 func buildCommands() []SlashCommand {
@@ -139,10 +168,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.mode == ModeBuild {
 			m.mode = ModePlan
-			m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: "已切换到 Plan 模式"})
+			setStatus(m, "PLAN 模式：AI 仅思考，不会执行任何工具（安全预览）")
 		} else {
 			m.mode = ModeBuild
-			m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: "已切换到 Build 模式"})
+			setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
 		}
 		return m, nil
 	case "enter":
@@ -279,11 +308,17 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 			"  /set            打开设置面板",
 			"  /help           显示此帮助",
 			"",
+			"模式说明：",
+			"  BUILD（默认）    AI 可执行工具（读写文件、运行命令）",
+			"  PLAN             AI 仅思考，不会执行任何工具（安全预览）",
+			"  按 Tab 切换模式",
+			"",
 			"快捷键：",
-			"  Tab      切换 Build/Plan 模式",
+			"  Tab      切换 BUILD/PLAN 模式",
 			"  Ctrl+C   停止/退出",
 			"  上下键   历史翻动/菜单选择",
 			"  Enter    发送/确认选择",
+			"  Esc      关闭菜单/面板",
 		}, "\n")
 		m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: help})
 	}
@@ -407,10 +442,13 @@ func (m *Model) View() string {
 
 func (m *Model) viewChat() string {
 	var b strings.Builder
-	b.WriteString(m.viewHeader())
+
+	// 顶部状态栏
+	b.WriteString(m.viewTopBar())
 	b.WriteString("\n")
 
-	chatH := m.height - 6
+	// 聊天区域
+	chatH := m.height - 7
 	if chatH < 3 {
 		chatH = 3
 	}
@@ -426,9 +464,18 @@ func (m *Model) viewChat() string {
 		b.WriteString("\n")
 	}
 
+	// 分隔线
 	b.WriteString(strings.Repeat("─", m.width) + "\n")
-	b.WriteString(m.viewStatus() + "\n")
 
+	// 状态消息（模式切换提示）
+	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
+		b.WriteString(statusStyle.Render(" " + m.statusMsg) + "\n")
+	} else {
+		b.WriteString(m.viewStatus())
+		b.WriteString("\n")
+	}
+
+	// 斜杠命令菜单
 	if m.showSlashMenu && len(m.slashResults) > 0 {
 		b.WriteString("\n")
 		for i, cmd := range m.slashResults {
@@ -441,9 +488,10 @@ func (m *Model) viewChat() string {
 		b.WriteString(helpStyle.Render(" ↑↓ 选择 · Enter 确认 · Esc 关闭") + "\n")
 	}
 
+	// 输入框
 	b.WriteString("› ")
 	if m.input == "" && !m.showSlashMenu {
-		b.WriteString(helpStyle.Render("输入消息，/ 命令菜单，Tab 切换 Build/Plan..."))
+		b.WriteString(helpStyle.Render("输入消息，/ 命令菜单，Tab 切换 BUILD/PLAN..."))
 	} else {
 		b.WriteString(m.input)
 	}
@@ -451,12 +499,19 @@ func (m *Model) viewChat() string {
 	return b.String()
 }
 
-func (m *Model) viewHeader() string {
-	modeStr := "Build"
+func (m *Model) viewTopBar() string {
+	modeLabel := fmt.Sprintf(" %s ", m.mode.String())
+	modeStyled := fmt.Sprintf("\033[1;30;42m%s\033[0m", modeLabel)
 	if m.mode == ModePlan {
-		modeStr = "Plan"
+		modeStyled = fmt.Sprintf("\033[1;30;36m%s\033[0m", modeLabel)
 	}
-	return titleStyle.Render(" licode TUI ") + "  " + statusStyle.Render("["+modeStr+"]")
+	title := " licode "
+	right := fmt.Sprintf(" %d sessions ", len(m.sessions))
+	spaces := m.width - len(title) - len(modeLabel) - len(right)
+	if spaces < 1 {
+		spaces = 1
+	}
+	return title + modeStyled + strings.Repeat(" ", spaces) + statusStyle.Render(right)
 }
 
 func (m *Model) renderMessages() string {
