@@ -1,42 +1,35 @@
 package tui
 
-import (
-	"github.com/charmbracelet/lipgloss"
+import "github.com/charmbracelet/lipgloss"
+
+// opencode 深色主题近似色（16 进制，ANSI truecolor）
+const (
+	colorAccent  = "#79d0ff"
+	colorWarning = "#eab55f"
+	colorError   = "#f16c6c"
+	colorSuccess = "#7fd88f"
+	colorText    = "#e7e7e7"
+	colorMuted   = "#8a8a8a"
+	colorBorder  = "#3d3d3d"
+	colorBg      = "#1b1b1b"
+	colorPanel   = "#212121"
+	colorElement = "#2a2a2a"
+
+	colorBuild = "#6fa8ff"
+	colorPlan  = "#e8a33d"
+
+	borderChar = "▍"
 )
 
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// 供渲染使用的样式（按需构造，避免全局可变状态）
 var (
-	baseStyle = lipgloss.NewStyle().Padding(0, 1)
-
-	titleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#FAFAFA")).
-		Background(lipgloss.Color("#7D56F4")).
-		Padding(0, 2)
-
-	userMsgStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#00D1FF")).
-		Bold(true)
-
-	aiMsgStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FF79C6"))
-
-	toolStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#F1FA8C")).
-		Italic(true)
-
-	statusStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#6272A4")).
-		Italic(true)
-
-	errorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FF5555")).
-		Bold(true)
-
-	selectedStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#44475A")).
-		Foreground(lipgloss.Color("#F8F8F2"))
-
-	helpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#6272A4")).
-		Italic(true)
+	textStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText))
+	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted))
+	warnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(colorWarning))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(colorError))
+	accentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent))
+	panelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Background(lipgloss.Color(colorPanel))
+	elementStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Background(lipgloss.Color(colorElement))
 )

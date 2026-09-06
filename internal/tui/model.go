@@ -2,23 +2,47 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"licode/internal/agent"
-	"licode/internal/settings"
+	"licode/internal/ai"
 )
 
-type eventMsg agent.Event
+const Version = "0.0.42"
 
-type SlashCommand struct {
-	Name        string
-	Description string
-	Category    string
-	Action      func(m *Model)
+type lipglossColor = string
+
+type lineKind int
+
+const (
+	kindUser lineKind = iota
+	kindText
+	kindTool
+	kindThought
+	kindNote
+)
+
+type line struct {
+	kind    lineKind
+	color   string
+	text    string
+	expanded bool
+	payload string // 工具输出完整内容（折叠时保留）
+}
+
+type cmdItem struct {
+	name     string
+	title    string
+	category string
+	run      func(m *Model)
+}
+
+type sessItem struct {
+	id    string
+	title string
 }
 
 type Mode int
@@ -30,644 +54,507 @@ const (
 
 func (m Mode) String() string {
 	if m == ModePlan {
+		return "Plan"
+	}
+	return "Build"
+}
+
+func (m Mode) Key() string {
+	if m == ModePlan {
 		return "PLAN"
 	}
 	return "BUILD"
 }
 
-type message struct {
-	role    string // "user" | "assistant" | "system"
-	content string
-	isTool  bool
-	tool    string
-	args    string
-	output  string
-	isThought bool
-	thought string
-	isHeading bool
-	heading  string
-	isExpand  bool
+func (m Mode) Color() string {
+	if m == ModePlan {
+		return colorPlan
+	}
+	return colorBuild
 }
 
 type Model struct {
 	backend *Backend
-	width   int
-	height  int
+	w, h    int
 
-	mode Mode
+	mode  Mode
+	lines []line
 
-	messages []message
-	input    string
+	basePath string
 
-	history   []string
-	histIndex int
+	input   string
+	hist    []string
+	histIdx int
 
-	running bool
-	busy    bool
+	busy        bool
+	cancel      func()
+	events      chan agent.Event
+	spinnerIdx  int
+	toolPending string // 正在运行的工具显示文本（用于 spinner 前缀）
 
-	showSessions bool
-	showSettings bool
-	sessions     []sessionInfo
-	sessSelected int
+	cmdMenu  bool
+	cmdItems []cmdItem
+	cmdIdx   int
+
+	listOpen     bool
+	listItems    []sessItem
+	listSelected int
+
+	settingOpen  bool
 	settingField int
 
-	showSlashMenu bool
-	slashIndex    int
-	slashResults  []SlashCommand
+	toast    string
+	toastExp time.Time
 
-	eventCh  chan agent.Event
-	commands []SlashCommand
+	planExclude string
 
-	statusMsg    string
-	statusExpiry time.Time
+	ctrlCArmed    bool
+	ctrlCArmUntil time.Time
 
-	ctrlCCount int
-	ctrlCTime  time.Time
-
-	planModeExclusions string
-}
-
-type sessionInfo struct {
-	id    string
-	title string
-	count int
+	rows []int // 每次渲染后，把每个屏幕行 → 可切换的工具行下标(-1 无)
 }
 
 func NewModel(backend *Backend) *Model {
-	return &Model{
-		backend: backend,
-		mode:    ModeBuild,
-		eventCh: make(chan agent.Event, 128),
-		messages: []message{
-			{role: "assistant", content: "欢迎使用 licode！输入 /help 查看可用命令。"},
-		},
-		sessions:           make([]sessionInfo, 0, 8),
-		slashResults:       make([]SlashCommand, 0),
-		commands:           buildCommands(),
-		planModeExclusions: "Write,Edit,Delete,Move,Bash,Shell",
+	m := &Model{
+		backend:     backend,
+		basePath:    cwd(),
+		events:      make(chan agent.Event, 512),
+		cmdItems:    commandList(),
+		planExclude: "Write,Edit,Delete,Move,Bash,Shell",
 	}
+	m.listItems = m.sessionList()
+	m.replaySession()
+	return m
 }
 
-func setStatus(m *Model, msg string) {
-	m.statusMsg = msg
-	m.statusExpiry = time.Now().Add(5 * time.Second)
-}
-
-func buildCommands() []SlashCommand {
-	return []SlashCommand{
-		{Name: "/new", Description: "新建对话", Category: "session"},
-		{Name: "/delete", Description: "删除当前会话", Category: "session"},
-		{Name: "/branch", Description: "复制当前会话为分支", Category: "session"},
-		{Name: "/clear", Description: "清空当前对话", Category: "session"},
-		{Name: "/sessions", Description: "打开会话面板", Category: "session"},
-		{Name: "/set", Description: "打开设置面板", Category: "settings"},
-		{Name: "/plan", Description: "切换到 Plan 只读模式", Category: "action", Action: func(m *Model) {
-			if m.mode == ModeBuild {
-				m.mode = ModePlan
-				setStatus(m, "PLAN 模式：AI 仅思考，不会执行写入操作")
-			}
-		}},
-		{Name: "/build", Description: "切换到 Build 可执行模式", Category: "action", Action: func(m *Model) {
-			if m.mode == ModePlan {
-				m.mode = ModeBuild
-				setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
-			}
-		}},
-		{Name: "/help", Description: "显示帮助", Category: "action"},
+func cwd() string {
+	d, err := os.Getwd()
+	if err != nil {
+		return ""
 	}
+	return d
 }
 
+func (m *Model) showToast(msg string) {
+	m.toast = msg
+	m.toastExp = time.Now().Add(4 * time.Second)
+}
+
+// ── 生命周期 ──
 func (m *Model) Init() tea.Cmd {
-	m.refreshSessions()
-	return nil
+	return tea.Tick(70*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-func (m *Model) refreshSessions() {
-	infos := m.backend.Sessions()
-	m.sessions = make([]sessionInfo, len(infos))
-	for i, s := range infos {
-		m.sessions[i] = sessionInfo{id: s.ID, title: s.Title, count: s.Count}
-	}
-}
+type tickMsg struct{}
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
-	case tea.KeyMsg:
-		return m.handleKey(v)
 	case tea.WindowSizeMsg:
-		m.width = v.Width
-		m.height = v.Height
-	case eventMsg:
-		m.handleEvent(agent.Event(v))
+		m.w, m.h = v.Width, v.Height
+	case tickMsg:
+		if m.busy {
+			m.spinnerIdx++
+			m.drainEvents()
+		}
+		if !m.toastExp.IsZero() && m.toastExp.Before(time.Now()) {
+			m.toast = ""
+		}
+		return m, tea.Tick(70*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+	case tea.MouseMsg:
+		m.mouse(v)
+	case agent.Event:
+		m.onEvent(v)
+	case tea.KeyMsg:
+		return m.keyMsg(v)
 	}
 	return m, nil
 }
 
-func (m *Model) handleEvent(e agent.Event) {
+func (m *Model) drainEvents() {
+	for {
+		select {
+		case e := <-m.events:
+			m.onEvent(e)
+		default:
+			return
+		}
+	}
+}
+
+// ── 事件 → 行 ──
+func (m *Model) onEvent(e agent.Event) {
 	switch e.Type {
 	case agent.EventText:
-		m.messages = append(m.messages, message{role: "assistant", content: e.Content})
+		if len(m.lines) > 0 && m.lines[len(m.lines)-1].kind == kindText && m.toolPending == "" {
+			m.lines[len(m.lines)-1].text += e.Content
+			return
+		}
+		m.lines = append(m.lines, line{kind: kindText, color: m.mode.Color(), text: e.Content})
 	case agent.EventToolStart:
-		m.messages = append(m.messages, message{isTool: true, tool: e.ToolName, args: e.ToolArgs})
+		label := toolLabel(e.ToolName, e.ToolArgs)
+		m.toolPending = label
+		m.lines = append(m.lines, line{kind: kindTool, color: m.mode.Color(), text: label})
 	case agent.EventToolDone:
-		// 更新对应工具的 output
-		for i := len(m.messages) - 1; i >= 0; i-- {
-			if m.messages[i].isTool && m.messages[i].tool == e.ToolName && m.messages[i].output == "" {
-				m.messages[i].output = e.ToolOut
-				break
+		m.toolPending = ""
+		if len(m.lines) > 0 && m.lines[len(m.lines)-1].kind == kindTool {
+			idx := len(m.lines) - 1
+			out := strings.TrimSpace(e.ToolOut)
+			if out != "" {
+				m.lines[idx].payload = out
+				m.lines[idx].expanded = false
 			}
 		}
-	case agent.EventDone, agent.EventError:
+	case agent.EventError:
+		if !m.busy {
+			return
+		}
 		m.busy = false
-		m.running = false
+		m.cancel = nil
+		m.toolPending = ""
+		m.lines = append(m.lines, line{kind: kindNote, color: colorError, text: "错误: " + e.Error})
+	case agent.EventDone:
+		if !m.busy {
+			return
+		}
+		m.busy = false
+		m.cancel = nil
+		m.toolPending = ""
+		if len(m.lines) > 0 {
+			m.lines = append(m.lines, line{
+				kind:  kindNote,
+				color: m.mode.Color(),
+				text:  "▣ " + m.mode.String() + " · " + m.modelName(),
+			})
+		}
 	}
 }
 
-func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.showSlashMenu {
-		return m.handleSlashMenu(msg)
+// ── 鼠标：点击 “Click to expand” 行切换 ──
+func (m *Model) mouse(v tea.MouseMsg) {
+	if v.Type != tea.MouseLeft || v.Y < 0 || v.Y >= len(m.rows) {
+		return
 	}
-	if m.showSettings {
-		return m.handleSettings(msg)
+	idx := m.rows[v.Y]
+	if idx >= 0 && idx < len(m.lines) && m.lines[idx].kind == kindTool {
+		m.lines[idx].expanded = !m.lines[idx].expanded
 	}
-	if m.showSessions {
-		return m.handleSessions(msg)
-	}
+}
 
+// ── 按键 ──
+func (m *Model) keyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c":
-		if m.running {
-			m.backend.Interrupt()
-			setStatus(m, "已停止（再按 Ctrl+C 退出）")
-			return m, nil
-		}
-		if time.Since(m.ctrlCTime) < 2*time.Second && m.ctrlCCount >= 1 {
-			return m, tea.Quit
-		}
-		m.ctrlCCount = 1
-		m.ctrlCTime = time.Now()
-		setStatus(m, "再按 Ctrl+C 退出")
-		return m, nil
+	case "ctrl+c", "ctrl+q", "ctrl+d":
+		return m.onCtrlC()
 	case "tab":
-		if m.mode == ModeBuild {
-			m.mode = ModePlan
-			setStatus(m, "PLAN 模式：AI 仅思考，不会执行写入操作")
-		} else {
-			m.mode = ModeBuild
-			setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
+		if !m.busy {
+			if m.mode == ModeBuild {
+				m.mode = ModePlan
+			} else {
+				m.mode = ModeBuild
+			}
+		}
+		return m, nil
+	case "esc":
+		switch {
+		case m.cmdMenu:
+			m.cmdMenu = false
+			m.input = ""
+		case m.listOpen:
+			m.listOpen = false
+		case m.settingOpen:
+			m.settingOpen = false
 		}
 		return m, nil
 	case "enter":
-		return m.sendInput()
+		if m.cmdMenu {
+			if m.cmdIdx < len(m.cmdItems) {
+				it := m.cmdItems[m.cmdIdx]
+				m.cmdMenu = false
+				m.input = ""
+				if it.run != nil {
+					it.run(m)
+				}
+			}
+			return m, nil
+		}
+		m.sendInput()
+		return m, nil
 	case "backspace":
 		if len(m.input) > 0 {
-			m.input = m.input[:len(m.input)-1]
-			m.updateSlashMenu()
+			rs := []rune(m.input)
+			m.input = string(rs[:len(rs)-1])
+			m.updateCmdMenu()
 		}
+		return m, nil
 	case "up":
-		if len(m.history) > 0 && m.histIndex < len(m.history)-1 {
-			if m.histIndex == -1 {
-				m.histIndex = len(m.history) - 1
-			} else if m.histIndex > 0 {
-				m.histIndex--
-			}
-			m.input = m.history[m.histIndex]
-		}
+		m.up()
+		return m, nil
 	case "down":
-		if m.histIndex >= 0 {
-			m.histIndex++
-			if m.histIndex >= len(m.history) {
-				m.histIndex = -1
-				m.input = ""
-			} else {
-				m.input = m.history[m.histIndex]
-			}
-		}
+		m.down()
+		return m, nil
 	case "ctrl+u":
 		m.input = ""
-		m.showSlashMenu = false
-	default:
-		if msg.Type == tea.KeyRunes && len(msg.String()) == 1 {
-			m.input += msg.String()
-			m.updateSlashMenu()
-		}
-	}
-	return m, nil
-}
-
-func (m *Model) updateSlashMenu() {
-	input := strings.TrimSpace(m.input)
-	if !strings.HasPrefix(input, "/") {
-		m.showSlashMenu = false
-		m.slashResults = nil
-		return
-	}
-
-	query := strings.TrimPrefix(input, "/")
-	query = strings.TrimSpace(query)
-
-	var results []SlashCommand
-	for _, cmd := range m.commands {
-		name := strings.TrimPrefix(cmd.Name, "/")
-		if strings.HasPrefix(name, query) || query == "" {
-			results = append(results, cmd)
-		}
-	}
-
-	if len(results) > 0 {
-		m.showSlashMenu = true
-		m.slashResults = results
-		m.slashIndex = 0
-	} else {
-		m.showSlashMenu = false
-	}
-}
-
-func (m *Model) handleSlashMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.showSlashMenu = false
-		m.input = ""
+		m.cmdMenu = false
 		return m, nil
-	case "enter":
-		if m.slashIndex < len(m.slashResults) {
-			cmd := m.slashResults[m.slashIndex]
-			m.executeCommand(cmd)
-			m.input = ""
-			m.showSlashMenu = false
-			m.slashResults = nil
-			return m, nil
-		}
-	case "backspace":
-		if len(m.input) > 0 {
-			m.input = m.input[:len(m.input)-1]
-			m.updateSlashMenu()
-		}
-	case "down", "j":
-		if m.slashIndex < len(m.slashResults)-1 {
-			m.slashIndex++
-		}
-	case "up", "k":
-		if m.slashIndex > 0 {
-			m.slashIndex--
-		}
 	default:
-		if msg.Type == tea.KeyRunes && len(msg.String()) == 1 {
-			m.input += msg.String()
-			m.updateSlashMenu()
+		if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+			m.input += string(msg.Runes[0])
+			m.updateCmdMenu()
 		}
 	}
 	return m, nil
 }
 
-func (m *Model) executeCommand(cmd SlashCommand) {
-	if cmd.Action != nil {
-		cmd.Action(m)
-		return
+func (m *Model) onCtrlC() (tea.Model, tea.Cmd) {
+	now := time.Now()
+	if m.ctrlCArmed && now.Before(m.ctrlCArmUntil) {
+		return m, tea.Quit
 	}
-	switch cmd.Name {
-	case "/new":
-		m.backend.NewSession()
-		m.messages = nil
-		m.refreshSessions()
-	case "/delete":
-		m.backend.DeleteSession(m.backend.CurrentID())
-		m.messages = nil
-		m.refreshSessions()
-	case "/branch":
-		m.backend.BranchSession()
-		m.refreshSessions()
-	case "/clear":
-		m.messages = nil
-	case "/sessions":
-		m.showSessions = true
-		m.refreshSessions()
-	case "/set":
-		m.showSettings = true
-	case "/help":
-		help := strings.Join([]string{
-			"可用命令：",
-			"  /new            新建对话",
-			"  /delete         删除当前会话",
-			"  /branch         复制当前会话",
-			"  /clear          清空对话",
-			"  /sessions       打开会话面板",
-			"  /set            打开设置面板",
-			"  /plan           切换到 Plan 只读模式",
-			"  /build          切换到 Build 可执行模式",
-			"  /help           显示此帮助",
-			"",
-			"模式说明：",
-			"  BUILD（默认）    AI 可执行所有工具",
-			"  PLAN             AI 只读模式（搜索/查看，不写入）",
-			"  按 Tab 切换模式，禁用的工具可在设置中配置",
-			"",
-			"快捷键：",
-			"  Tab      切换 BUILD/PLAN",
-			"  Ctrl+C   停止/退出（连按两次）",
-			"  上下键   历史/菜单",
-			"  Enter    发送/确认",
-			"  Esc      关闭菜单",
-		}, "\n")
-		m.messages = append(m.messages, message{role: "assistant", content: help})
-	}
-}
-
-func (m *Model) handleSessions(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc":
-		m.showSessions = false
-	case "j", "down":
-		if m.sessSelected < len(m.sessions)-1 {
-			m.sessSelected++
+	m.ctrlCArmed = true
+	m.ctrlCArmUntil = now.Add(2 * time.Second)
+	if m.busy {
+		if m.cancel != nil {
+			m.cancel()
 		}
-	case "k", "up":
-		if m.sessSelected > 0 {
-			m.sessSelected--
-		}
-	case "enter":
-		if m.sessSelected < len(m.sessions) {
-			m.backend.SwitchSession(m.sessions[m.sessSelected].id)
-			m.messages = nil
-		}
-		m.showSessions = false
-	case "n":
-		m.backend.NewSession()
-		m.refreshSessions()
-		m.showSessions = false
-		m.messages = nil
-	case "d":
-		if m.sessSelected < len(m.sessions) {
-			m.backend.DeleteSession(m.sessions[m.sessSelected].id)
-			m.refreshSessions()
-			if m.sessSelected >= len(m.sessions) && m.sessSelected > 0 {
-				m.sessSelected--
-			}
-		}
+		m.showToast("已停止（再按 Ctrl+C 退出）")
+	} else {
+		m.showToast("再按 Ctrl+C 退出")
 	}
 	return m, nil
 }
 
-func (m *Model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc":
-		m.showSettings = false
-	case "j", "down":
-		if m.settingField < len(m.settingKeys())-1 {
-			m.settingField++
+func (m *Model) up() {
+	switch {
+	case m.cmdMenu:
+		if m.cmdIdx > 0 {
+			m.cmdIdx--
 		}
-	case "k", "up":
+	case m.listOpen:
+		if m.listSelected > 0 {
+			m.listSelected--
+		}
+	case m.settingOpen:
 		if m.settingField > 0 {
 			m.settingField--
 		}
-	case "enter":
-		m.input = "/set " + m.settingKeys()[m.settingField] + " "
-		m.showSettings = false
+	default:
+		if len(m.hist) == 0 {
+			return
+		}
+		if m.histIdx < 0 {
+			m.histIdx = len(m.hist) - 1
+		} else if m.histIdx > 0 {
+			m.histIdx--
+		}
+		m.input = m.hist[m.histIdx]
 	}
-	return m, nil
 }
 
-func (m *Model) settingKeys() []string {
-	return []string{"provider", "model", "base_url", "api_key", "temperature", "max_tokens", "max_iterations", "plan_exclude"}
+func (m *Model) down() {
+	switch {
+	case m.cmdMenu:
+		if m.cmdIdx < len(m.cmdItems)-1 {
+			m.cmdIdx++
+		}
+	case m.listOpen:
+		if m.listSelected < len(m.listItems)-1 {
+			m.listSelected++
+		}
+	case m.settingOpen:
+		if m.settingField < len(settingFields)-1 {
+			m.settingField++
+		}
+	default:
+		if m.histIdx >= 0 {
+			m.histIdx++
+			if m.histIdx >= len(m.hist) {
+				m.histIdx = -1
+				m.input = ""
+			} else {
+				m.input = m.hist[m.histIdx]
+			}
+		}
+	}
 }
 
-func (m *Model) sendInput() (tea.Model, tea.Cmd) {
+func (m *Model) updateCmdMenu() {
+	trim := strings.TrimSpace(m.input)
+	m.cmdMenu = strings.HasPrefix(trim, "/") && !m.busy
+	if m.cmdMenu {
+		q := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trim, "/")))
+		items := make([]cmdItem, 0, len(commandList()))
+		for _, c := range commandList() {
+			if q == "" || strings.HasPrefix(strings.ToLower(c.name), q) {
+				items = append(items, c)
+			}
+		}
+		m.cmdItems = items
+		m.cmdIdx = 0
+	}
+}
+
+// ── 发送 ──
+func (m *Model) sendInput() {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
-		return m, nil
+		return
 	}
-	m.history = append(m.history, text)
-	m.histIndex = -1
+	m.hist = append(m.hist, text)
+	m.histIdx = -1
 	m.input = ""
-	m.showSlashMenu = false
-	m.slashResults = nil
+	m.cmdMenu = false
 
 	if strings.HasPrefix(text, "/set ") {
-		parts := strings.SplitN(text, " ", 3)
-		if len(parts) >= 3 && parts[2] != "" {
-			field := parts[1]
-			val := parts[2]
-			m.backend.UpdateSettings(func(s *settings.Settings) {
-				updateSettingField(s, field, val)
-			})
-			if field == "plan_exclude" {
-				m.planModeExclusions = val
-			}
-			m.backend.RefreshClients()
-			m.messages = append(m.messages, message{role: "assistant", content: fmt.Sprintf("已更新: %s = %s", field, val)})
-		}
-		return m, nil
+		m.doSetting(text)
+		return
 	}
 
-	m.messages = append(m.messages, message{role: "user", content: text})
-
-	userMsg := text
-	if m.mode == ModePlan && m.planModeExclusions != "" {
-		userMsg = text + fmt.Sprintf("\n\n[PLAN 只读模式，以下工具已禁用：%s。可搜索/查看文件，但不能写入/修改/删除。]", m.planModeExclusions)
+	prompt := text
+	if m.mode == ModePlan {
+		prompt = text + "\n\n[PLAN 只读模式：仅搜索/查看，禁止写入/修改/删除]"
 	}
 
-	events, err := m.backend.RunAgent(context.Background(), userMsg)
+	m.lines = append(m.lines, line{kind: kindUser, color: m.mode.Color(), text: text})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := m.backend.RunAgent(ctx, prompt)
 	if err != nil {
-		m.messages = append(m.messages, message{role: "assistant", content: fmt.Sprintf("错误: %s", err.Error())})
-		return m, nil
+		cancel()
+		m.lines = append(m.lines, line{kind: kindNote, color: colorError, text: "错误: " + err.Error()})
+		return
 	}
+	m.cancel = cancel
 	m.busy = true
-	m.running = true
-
 	go func() {
-		for e := range events {
-			m.eventCh <- e
+		for e := range ch {
+			m.events <- e
 		}
+		m.events <- agent.Event{Type: agent.EventDone}
 	}()
-
-	return m, tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
-		select {
-		case e := <-m.eventCh:
-			return eventMsg(e)
-		default:
-			return nil
-		}
-	})
 }
 
-func (m *Model) View() string {
-	if m.showSessions {
-		return m.viewSessions()
-	}
-	if m.showSettings {
-		return m.viewSettings()
-	}
-	return m.viewChat()
+func (m *Model) setPlanExclude(val string) {
+	m.planExclude = val
 }
 
-func (m *Model) viewChat() string {
-	var b strings.Builder
-
-	// 顶部状态栏
-	b.WriteString(m.viewTopBar())
-	b.WriteString("\n")
-
-	// 对话内容区
-	chatH := m.height - 3
-	if chatH < 3 {
-		chatH = 3
+func (m *Model) replaySession() {
+	msgs := m.backend.CurrentSessionMessages()
+	for _, msg := range msgs {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" || strings.HasPrefix(content, "[PLAN 只读") {
+			continue
+		}
+		kind := kindText
+		if msg.Role == ai.RoleUser {
+			kind = kindUser
+		}
+		m.appendBody(kind, m.mode.Color(), content)
 	}
-	msgStr := m.renderMessages()
-	contentLines := strings.Split(msgStr, "\n")
-	if len(contentLines) > chatH {
-		contentLines = contentLines[len(contentLines)-chatH:]
-	}
-	for _, l := range contentLines {
-		b.WriteString(l)
-		b.WriteString("\n")
-	}
-	for i := len(contentLines); i < chatH; i++ {
-		b.WriteString("\n")
-	}
-
-	// 输入框（无前缀）
-	b.WriteString(m.input)
-	b.WriteString("\n")
-
-	// 底部状态栏
-	b.WriteString(m.viewStatusBar())
-
-	return b.String()
 }
 
-func (m *Model) viewTopBar() string {
-	left := " licode "
-	modeStr := m.mode.String()
-	right := fmt.Sprintf(" %s ", modeStr)
-	spaces := m.width - len(left) - len(right)
-	if spaces < 1 {
-		spaces = 1
+// ── 工具显示 ──
+func toolLabel(name, args string) string {
+	base := map[string]string{
+		"bash":       "$",
+		"shell":      "$",
+		"execute":    "$",
+		"glob":       "✱",
+		"grep":       "✱",
+		"read":       "→",
+		"webfetch":   "%",
+		"websearch":  "◈",
+		"write":      "←",
+		"edit":       "←",
+		"apply_patch": "%",
+		"todowrite":  "⚙",
+		"task":       "│",
+		"question":   "→",
+		"skill":      "→",
 	}
-	return left + strings.Repeat("─", spaces) + right
+	icon, ok := base[name]
+	if !ok {
+		icon = "⚙"
+	}
+	lower := strings.ToLower(name)
+	var desc string
+	switch {
+	case lower == "bash" || lower == "shell":
+		desc = argsPayload(args)
+		if desc == "" {
+			desc = "(no command)"
+		}
+	case lower == "read":
+		desc = truncate(cleanArg(args, "filePath", "path"), 60)
+	case lower == "glob":
+		desc = `Glob "` + truncate(cleanArg(args, "pattern", "include"), 60) + `"`
+	case lower == "grep":
+		desc = `Grep "` + truncate(cleanArg(args, "pattern", "query"), 60) + `"`
+	case lower == "webfetch":
+		desc = "WebFetch " + truncate(cleanArg(args, "url"), 60)
+	case lower == "websearch":
+		desc = `WebSearch "` + truncate(cleanArg(args, "query"), 60) + `"`
+	case lower == "write" || lower == "edit":
+		desc = "Write/Edit " + truncate(cleanArg(args, "filePath", "path"), 60)
+	default:
+		desc = truncate(argsPayload(args), 80)
+	}
+	if icon == "$" {
+		return "$ " + desc
+	}
+	return icon + " " + desc
 }
 
-func (m *Model) renderMessages() string {
-	var msgs []string
-	for _, msg := range m.messages {
-		switch {
-		case msg.isTool:
-			toolLine := fmt.Sprintf("$ %s(%s)", msg.tool, msg.args)
-			if msg.output != "" {
-				out := msg.output
-				if len(out) > 100 {
-					out = out[:100] + "..."
-				}
-				toolLine += fmt.Sprintf("\n  -> %s", out)
-			}
-			msgs = append(msgs, toolStyle.Render(toolLine))
-		case msg.isThought:
-			msgs = append(msgs, statusStyle.Render("+ Thought: "+msg.thought))
-		case msg.isHeading:
-			msgs = append(msgs, "# "+msg.heading)
-		case msg.isExpand:
-			msgs = append(msgs, statusStyle.Render(msg.content))
-		default:
-			msgs = append(msgs, msg.content)
-		}
-	}
-	return strings.Join(msgs, "\n")
-}
-
-func (m *Model) viewStatusBar() string {
-	dir, _ := os.Getwd()
-	if len(dir) > 40 {
-		dir = "..." + dir[len(dir)-37:]
-	}
-	size := "1.2 MB"
-	tip := "Ctrl+p commands"
-	ver := "0.0.40"
-	return dir + "  " + size + "  " + tip + "  " + "LiCode " + ver
-}
-
-func (m *Model) viewSessions() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render(" 会话列表 ") + "\n\n")
-	for i, s := range m.sessions {
-		style := baseStyle
-		if i == m.sessSelected {
-			style = selectedStyle
-		}
-		title := s.title
-		if len(title) > 20 {
-			title = title[:20] + "..."
-		}
-		b.WriteString(style.Render(fmt.Sprintf(" %s (%d 条)", title, s.count)) + "\n")
-	}
-	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 切换 · n 新建 · d 删除 · q/esc 返回"))
-	return b.String()
-}
-
-func (m *Model) viewSettings() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render(" 设置 ") + "\n\n")
-	keys := m.settingKeys()
-	for i, key := range keys {
-		style := baseStyle
-		if i == m.settingField {
-			style = selectedStyle
-		}
-		val := ""
-		if key == "plan_exclude" {
-			val = m.planModeExclusions
-			if val == "" {
-				val = "(空 = 全部禁用)"
-			}
-		} else {
-			val = settingValue(m.backend.Settings(), key)
-		}
-		label := key
-		if key == "plan_exclude" {
-			label = "PLAN禁用工具"
-		}
-		b.WriteString(style.Render(fmt.Sprintf(" %-18s %s", label+":", val)) + "\n")
-	}
-	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 编辑(自动填充/set命令) · q/esc 关闭"))
-	return b.String()
-}
-
-func settingValue(s *settings.Settings, key string) string {
-	switch key {
-	case "provider":
-		return s.Provider
-	case "model":
-		return s.Model
-	case "base_url":
-		return s.BaseURL
-	case "api_key":
-		if s.APIKey != "" {
-			return "********"
-		}
+func argsPayload(args string) string {
+	args = strings.TrimSpace(args)
+	if args == "" {
 		return ""
-	case "temperature":
-		return fmt.Sprintf("%.2f", s.Temperature)
-	case "max_tokens":
-		return fmt.Sprintf("%d", s.MaxTokens)
-	case "max_iterations":
-		return fmt.Sprintf("%d", s.MaxIterations)
 	}
-	return ""
+	if len(args) > 120 {
+		return args[:120] + "..."
+	}
+	return args
 }
 
-func updateSettingField(s *settings.Settings, key, val string) {
-	switch key {
-	case "provider":
-		s.Provider = val
-	case "model":
-		s.Model = val
-	case "base_url":
-		s.BaseURL = strings.TrimRight(val, "/")
-	case "api_key":
-		s.APIKey = val
-	case "temperature":
-		fmt.Sscanf(val, "%f", &s.Temperature)
-	case "max_tokens":
-		fmt.Sscanf(val, "%d", &s.MaxTokens)
-	case "max_iterations":
-		fmt.Sscanf(val, "%d", &s.MaxIterations)
+func cleanArg(args string, keys ...string) string {
+	args = strings.TrimSpace(args)
+	if strings.HasPrefix(args, "{") {
+		// 尝试粗提取 JSON 字段
+		for _, k := range keys {
+			if v, ok := jsonField(args, k); ok {
+				return v
+			}
+		}
 	}
+	args = strings.TrimPrefix(args, "{")
+	args = strings.TrimSuffix(args, "}")
+	return strings.TrimSpace(args)
+}
+
+func jsonField(s, key string) (string, bool) {
+	idx := strings.Index(s, `"`+key+`"`)
+	if idx < 0 {
+		return "", false
+	}
+	rest := s[idx+len(key)+2:]
+	rest = strings.TrimLeft(rest, " \t\r\n")
+	if strings.HasPrefix(rest, ": ") {
+		rest = rest[2:]
+	} else if strings.HasPrefix(rest, ":") {
+		rest = rest[1:]
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	if strings.HasPrefix(rest, `"`) {
+		end := strings.Index(rest[1:], `"`)
+		if end >= 0 {
+			return rest[1 : 1+end], true
+		}
+	}
+	return "", false
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

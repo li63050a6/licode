@@ -24,7 +24,7 @@ func NewTUICommand() *cobra.Command {
 				return err
 			}
 			model := tui.NewModel(backend)
-			p := tea.NewProgram(model, tea.WithAltScreen())
+			p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 			if _, err := p.Run(); err != nil {
 				log.Printf("TUI 退出: %v", err)
 				return err
