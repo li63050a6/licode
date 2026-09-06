@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -79,7 +80,7 @@ type sessionInfo struct {
 }
 
 func NewModel(backend *Backend) *Model {
-	m := &Model{
+	return &Model{
 		backend:            backend,
 		mode:               ModeBuild,
 		eventCh:            make(chan agent.Event, 128),
@@ -88,7 +89,6 @@ func NewModel(backend *Backend) *Model {
 		commands:           buildCommands(),
 		planModeExclusions: "Write,Edit,Delete,Move,Bash,Shell",
 	}
-	return m
 }
 
 func setStatus(m *Model, msg string) {
@@ -104,18 +104,6 @@ func buildCommands() []SlashCommand {
 		{Name: "/clear", Description: "清空当前对话", Category: "session"},
 		{Name: "/sessions", Description: "打开会话面板", Category: "session"},
 		{Name: "/set", Description: "打开设置面板", Category: "settings"},
-		{Name: "/plan", Description: "切换到 Plan 只读模式", Category: "action", Action: func(m *Model) {
-			if m.mode == ModeBuild {
-				m.mode = ModePlan
-				setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
-			}
-		}},
-		{Name: "/build", Description: "切换到 Build 可执行模式", Category: "action", Action: func(m *Model) {
-			if m.mode == ModePlan {
-				m.mode = ModeBuild
-				setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
-			}
-		}},
 		{Name: "/help", Description: "显示帮助", Category: "action"},
 	}
 }
@@ -178,10 +166,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.mode == ModeBuild {
 			m.mode = ModePlan
-			setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
+			setStatus(m, "PLAN 模式：AI 仅思考，不会执行任何工具（安全预览）")
 		} else {
 			m.mode = ModeBuild
-			setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
+			setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
 		}
 		return m, nil
 	case "enter":
@@ -320,21 +308,19 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 			"  /clear          清空对话",
 			"  /sessions       打开会话面板",
 			"  /set            打开设置面板",
-			"  /plan           切换到 Plan 只读模式",
-			"  /build          切换到 Build 可执行模式",
 			"  /help           显示此帮助",
 			"",
 			"模式说明：",
 			"  BUILD（默认）    AI 可执行所有工具",
 			"  PLAN             AI 只读模式（搜索/查看，不写入）",
-			"  按 Tab 切换，禁用的工具可在设置中配置",
+			"  按 Tab 切换模式",
 			"",
 			"快捷键：",
-			"  Tab      切换 BUILD/PLAN",
+			"  Tab      切换 BUILD/PLAN 模式",
 			"  Ctrl+C   停止/退出（连按两次）",
-			"  上下键   历史/菜单",
-			"  Enter    发送/确认",
-			"  Esc      关闭菜单",
+			"  上下键   历史翻动/菜单选择",
+			"  Enter    发送/确认选择",
+			"  Esc      关闭菜单/面板",
 		}, "\n")
 		m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: help})
 	}
@@ -473,12 +459,12 @@ func (m *Model) View() string {
 func (m *Model) viewChat() string {
 	var b strings.Builder
 
-	// 顶部状态栏
+	// 1. 顶部状态栏
 	b.WriteString(m.viewTopBar())
 	b.WriteString("\n")
 
-	// 聊天内容区
-	chatH := m.height - 7
+	// 2. 聊天内容区（纯文本，无边框）
+	chatH := m.height - 3 // 底部留 2 行：输入框 + 状态栏
 	if chatH < 3 {
 		chatH = 3
 	}
@@ -494,51 +480,28 @@ func (m *Model) viewChat() string {
 		b.WriteString("\n")
 	}
 
-	// 分隔线
-	b.WriteString(strings.Repeat("─", m.width) + "\n")
+	// 3. 输入框（无前缀）
+	b.WriteString(m.input)
+	b.WriteString("\n")
 
-	// 状态消息
-	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
-		b.WriteString(statusStyle.Render(" " + m.statusMsg) + "\n")
-	} else {
-		b.WriteString(m.viewStatus())
-		b.WriteString("\n")
-	}
-
-	// 斜杠命令菜单
-	if m.showSlashMenu && len(m.slashResults) > 0 {
-		b.WriteString("\n")
-		for i, cmd := range m.slashResults {
-			style := baseStyle
-			if i == m.slashIndex {
-				style = selectedStyle
-			}
-			b.WriteString(style.Render(fmt.Sprintf(" %-22s %s", cmd.Name, cmd.Description)) + "\n")
-		}
-		b.WriteString(helpStyle.Render(" ↑↓ 选择 · Enter 确认 · Esc 关闭") + "\n")
-	}
-
-	// 输入框
-	b.WriteString("› ")
-	if m.input == "" && !m.showSlashMenu {
-		b.WriteString(helpStyle.Render("输入消息，/ 命令菜单，Tab 切换 BUILD/PLAN..."))
-	} else {
-		b.WriteString(m.input)
-	}
+	// 4. 底部状态栏
+	b.WriteString(m.viewStatusBar())
 
 	return b.String()
 }
 
 func (m *Model) viewTopBar() string {
-	modeLabel := m.mode.String()
-	modeStr := fmt.Sprintf(" %s ", modeLabel)
-	title := " licode "
-	right := fmt.Sprintf(" %d sessions ", len(m.sessions))
-	spaces := m.width - len(title) - len(modeStr) - len(right)
+	// 左侧：应用名
+	left := " licode "
+	// 右侧：模式指示器
+	modeStr := m.mode.String()
+	right := fmt.Sprintf(" %s ", modeStr)
+	// 填充中间
+	spaces := m.width - len(left) - len(right)
 	if spaces < 1 {
 		spaces = 1
 	}
-	return title + " [" + modeStr + "]" + strings.Repeat(" ", spaces) + statusStyle.Render(right)
+	return left + strings.Repeat("─", spaces) + right
 }
 
 func (m *Model) renderMessages() string {
@@ -568,20 +531,15 @@ func (m *Model) renderMessages() string {
 	return strings.Join(msgs, "\n")
 }
 
-func (m *Model) viewStatus() string {
-	s := m.backend.Settings()
-	parts := []string{
-		fmt.Sprintf("模型: %s", s.Model),
-		fmt.Sprintf("提供商: %s", s.Provider),
+func (m *Model) viewStatusBar() string {
+	dir, _ := os.Getwd()
+	if len(dir) > 40 {
+		dir = "..." + dir[len(dir)-37:]
 	}
-	if m.running {
-		parts = append(parts, statusStyle.Render("运行中..."))
-	}
-	u := m.backend.SessionUsage()
-	if u.InputTokens > 0 {
-		parts = append(parts, fmt.Sprintf("Token: %d/%d", u.InputTokens, u.OutputTokens))
-	}
-	return statusStyle.Render(" " + strings.Join(parts, " · ") + " ")
+	size := "1.2 MB"
+	tip := "Ctrl+p commands"
+	ver := "0.0.34"
+	return dir + "  " + size + "  " + tip + "  " + "LiCode " + ver
 }
 
 func (m *Model) viewSessions() string {
@@ -626,7 +584,7 @@ func (m *Model) viewSettings() string {
 		}
 		b.WriteString(style.Render(fmt.Sprintf(" %-18s %s", label+":", val)) + "\n")
 	}
-	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 编辑 · q/esc 关闭"))
+	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 编辑(自动填充/set命令) · q/esc 关闭"))
 	return b.String()
 }
 
