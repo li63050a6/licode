@@ -11,7 +11,7 @@ import (
 	"licode/internal/ai"
 )
 
-const Version = "0.0.42"
+const Version = "0.0.43"
 
 type lipglossColor = string
 
@@ -23,14 +23,18 @@ const (
 	kindTool
 	kindThought
 	kindNote
+	kindFooter
 )
 
 type line struct {
-	kind    lineKind
-	color   string
-	text    string
+	kind     lineKind
+	color    string
+	text     string
 	expanded bool
-	payload string // 工具输出完整内容（折叠时保留）
+	payload  string // 工具输出完整内容（折叠时保留）
+	tool     string // 工具名
+	args     string // 工具参数(JSON)
+	running  bool   // 工具是否运行中
 }
 
 type cmdItem struct {
@@ -191,14 +195,14 @@ func (m *Model) onEvent(e agent.Event) {
 		}
 		m.lines = append(m.lines, line{kind: kindText, color: m.mode.Color(), text: e.Content})
 	case agent.EventToolStart:
-		label := toolLabel(e.ToolName, e.ToolArgs)
-		m.toolPending = label
-		m.lines = append(m.lines, line{kind: kindTool, color: m.mode.Color(), text: label})
+		m.toolPending = e.ToolName
+		m.lines = append(m.lines, line{kind: kindTool, color: m.mode.Color(), tool: e.ToolName, args: e.ToolArgs, running: true})
 	case agent.EventToolDone:
 		m.toolPending = ""
 		if len(m.lines) > 0 && m.lines[len(m.lines)-1].kind == kindTool {
 			idx := len(m.lines) - 1
 			out := strings.TrimSpace(e.ToolOut)
+			m.lines[idx].running = false
 			if out != "" {
 				m.lines[idx].payload = out
 				m.lines[idx].expanded = false
@@ -220,11 +224,7 @@ func (m *Model) onEvent(e agent.Event) {
 		m.cancel = nil
 		m.toolPending = ""
 		if len(m.lines) > 0 {
-			m.lines = append(m.lines, line{
-				kind:  kindNote,
-				color: m.mode.Color(),
-				text:  "▣ " + m.mode.String() + " · " + m.modelName(),
-			})
+			m.lines = append(m.lines, line{kind: kindFooter, color: m.mode.Color()})
 		}
 	}
 }
