@@ -17,6 +17,7 @@ type SlashCommand struct {
 	Name        string
 	Description string
 	Category    string
+	Action      func(m *Model)
 }
 
 type Mode int
@@ -35,16 +36,9 @@ func (m Mode) String() string {
 
 func (m Mode) Desc() string {
 	if m == ModePlan {
-		return "仅思考，不执行工具（安全预览）"
+		return "只读模式：可搜索、查看文件，但不能写入/修改/删除"
 	}
 	return "可执行工具（读写文件、运行命令）"
-}
-
-func (m Mode) Color() string {
-	if m == ModePlan {
-		return "#8BE9FD"
-	}
-	return "#50FA7B"
 }
 
 type Model struct {
@@ -79,6 +73,9 @@ type Model struct {
 
 	statusMsg    string
 	statusExpiry time.Time
+
+	ctrlCCount   int
+	ctrlCTime    time.Time
 }
 
 type sessionInfo struct {
@@ -113,6 +110,18 @@ func buildCommands() []SlashCommand {
 		{Name: "/clear", Description: "清空当前对话", Category: "session"},
 		{Name: "/sessions", Description: "打开会话面板", Category: "session"},
 		{Name: "/set", Description: "打开设置面板", Category: "settings"},
+		{Name: "/plan", Description: "切换到 Plan 只读模式", Category: "action", Action: func(m *Model) {
+			if m.mode == ModeBuild {
+				m.mode = ModePlan
+				setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
+			}
+		}},
+		{Name: "/build", Description: "切换到 Build 可执行模式", Category: "action", Action: func(m *Model) {
+			if m.mode == ModePlan {
+				m.mode = ModeBuild
+				setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
+			}
+		}},
 		{Name: "/help", Description: "显示帮助", Category: "action"},
 	}
 }
@@ -162,16 +171,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		if m.running {
 			m.backend.Interrupt()
+			setStatus(m, "已停止（再按 Ctrl+C 退出）")
 			return m, nil
 		}
-		return m, tea.Quit
+		if time.Since(m.ctrlCTime) < 2*time.Second && m.ctrlCCount >= 1 {
+			return m, tea.Quit
+		}
+		m.ctrlCCount = 1
+		m.ctrlCTime = time.Now()
+		setStatus(m, "再按 Ctrl+C 退出")
+		return m, nil
 	case "tab":
 		if m.mode == ModeBuild {
 			m.mode = ModePlan
-			setStatus(m, "PLAN 模式：AI 仅思考，不会执行任何工具（安全预览）")
+			setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
 		} else {
 			m.mode = ModeBuild
-			setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
+			setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
 		}
 		return m, nil
 	case "enter":
@@ -278,6 +294,10 @@ func (m *Model) handleSlashMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) executeCommand(cmd SlashCommand) {
+	if cmd.Action != nil {
+		cmd.Action(m)
+		return
+	}
 	switch cmd.Name {
 	case "/new":
 		m.backend.NewSession()
@@ -297,6 +317,16 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 		m.refreshSessions()
 	case "/set":
 		m.showSettings = true
+	case "/plan":
+		if m.mode == ModeBuild {
+			m.mode = ModePlan
+			setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
+		}
+	case "/build":
+		if m.mode == ModePlan {
+			m.mode = ModeBuild
+			setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
+		}
 	case "/help":
 		help := strings.Join([]string{
 			"可用命令：",
@@ -310,12 +340,12 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 			"",
 			"模式说明：",
 			"  BUILD（默认）    AI 可执行工具（读写文件、运行命令）",
-			"  PLAN             AI 仅思考，不会执行任何工具（安全预览）",
+			"  PLAN             AI 只读模式（可搜索、查看文件，不能写入/修改/删除）",
 			"  按 Tab 切换模式",
 			"",
 			"快捷键：",
 			"  Tab      切换 BUILD/PLAN 模式",
-			"  Ctrl+C   停止/退出",
+			"  Ctrl+C   停止/退出（连按两次）",
 			"  上下键   历史翻动/菜单选择",
 			"  Enter    发送/确认选择",
 			"  Esc      关闭菜单/面板",
@@ -404,9 +434,15 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// 构建用户消息，Plan 模式下追加只读提示
+	userMsg := text
+	if m.mode == ModePlan {
+		userMsg = text + "\n\n[系统提示：当前为 PLAN 只读模式。你可以搜索代码、查看文件内容，但不能写入、修改或删除任何文件。请在回答中明确说明需要执行的操作，但不实际执行写入操作。]"
+	}
+
 	m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: "你: " + text})
 
-	events, err := m.backend.RunAgent(context.Background(), text)
+	events, err := m.backend.RunAgent(context.Background(), userMsg)
 	if err != nil {
 		m.messages = append(m.messages, agent.Event{Type: agent.EventError, Content: err.Error()})
 		return m, nil
@@ -442,12 +478,9 @@ func (m *Model) View() string {
 
 func (m *Model) viewChat() string {
 	var b strings.Builder
-
-	// 顶部状态栏
 	b.WriteString(m.viewTopBar())
 	b.WriteString("\n")
 
-	// 聊天区域
 	chatH := m.height - 7
 	if chatH < 3 {
 		chatH = 3
@@ -464,10 +497,8 @@ func (m *Model) viewChat() string {
 		b.WriteString("\n")
 	}
 
-	// 分隔线
 	b.WriteString(strings.Repeat("─", m.width) + "\n")
 
-	// 状态消息（模式切换提示）
 	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
 		b.WriteString(statusStyle.Render(" " + m.statusMsg) + "\n")
 	} else {
@@ -475,7 +506,6 @@ func (m *Model) viewChat() string {
 		b.WriteString("\n")
 	}
 
-	// 斜杠命令菜单
 	if m.showSlashMenu && len(m.slashResults) > 0 {
 		b.WriteString("\n")
 		for i, cmd := range m.slashResults {
@@ -488,7 +518,6 @@ func (m *Model) viewChat() string {
 		b.WriteString(helpStyle.Render(" ↑↓ 选择 · Enter 确认 · Esc 关闭") + "\n")
 	}
 
-	// 输入框
 	b.WriteString("› ")
 	if m.input == "" && !m.showSlashMenu {
 		b.WriteString(helpStyle.Render("输入消息，/ 命令菜单，Tab 切换 BUILD/PLAN..."))
