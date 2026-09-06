@@ -1,4 +1,3 @@
-// Package cmd 提供 TUI 终端界面命令。
 package cmd
 
 import (
@@ -17,25 +16,10 @@ func NewTUICommand() *cobra.Command {
 		Short: "AI 编程助手（TUI 终端界面）",
 		Long: `licode —— 启动终端 TUI 界面。
 
-启动后即可在终端中与 licode 对话，支持：
-  - 流式回复（实时显示 AI 输出）
-  - 工具调用可视化
-  - 会话管理（新建/切换/删除/分支）
-  - 快捷键操作
-
-启动 Web 服务器：./licode web
-
-快捷键：
-  Enter      发送消息
-  Tab        切换会话
-  Ctrl+C     停止/退出
-  Ctrl+U     清空输入`,
+启动后即可在终端中与 licode 对话。
+启动 Web 服务器：./licode web`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			backend, err := tui.NewBackend()
-			if err != nil {
-				return err
-			}
-			model := tui.NewModel(backend)
+			model := tui.NewModel()
 			p := tea.NewProgram(model, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				log.Printf("TUI 退出: %v", err)
