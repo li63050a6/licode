@@ -34,13 +34,6 @@ func (m Mode) String() string {
 	return "BUILD"
 }
 
-func (m Mode) Desc() string {
-	if m == ModePlan {
-		return "只读模式：可搜索、查看文件，但不能写入/修改/删除"
-	}
-	return "可执行工具（读写文件、运行命令）"
-}
-
 type Model struct {
 	backend *Backend
 	width   int
@@ -62,7 +55,6 @@ type Model struct {
 	sessions     []sessionInfo
 	sessSelected int
 	settingField int
-	settingKeys  []string
 
 	showSlashMenu bool
 	slashIndex    int
@@ -74,8 +66,11 @@ type Model struct {
 	statusMsg    string
 	statusExpiry time.Time
 
-	ctrlCCount   int
-	ctrlCTime    time.Time
+	ctrlCCount int
+	ctrlCTime  time.Time
+
+	// PLAN 模式禁用的工具（逗号分隔）
+	planModeExclusions string
 }
 
 type sessionInfo struct {
@@ -85,16 +80,27 @@ type sessionInfo struct {
 }
 
 func NewModel(backend *Backend) *Model {
-	m := &Model{
-		backend:      backend,
-		mode:         ModeBuild,
-		eventCh:      make(chan agent.Event, 128),
-		sessions:     make([]sessionInfo, 0, 8),
-		settingKeys:  []string{"provider", "model", "base_url", "api_key", "temperature", "max_tokens", "max_iterations"},
-		slashResults: make([]SlashCommand, 0),
-		commands:     buildCommands(),
+	return &Model{
+		backend:            backend,
+		mode:               ModeBuild,
+		eventCh:            make(chan agent.Event, 128),
+		sessions:           make([]sessionInfo, 0, 8),
+		slashResults:       make([]SlashCommand, 0),
+		commands:           buildCommands(),
+		planModeExclusions: "Write,Edit,Delete,Move,Bash,Shell",
 	}
-	return m
+}
+
+func NewModelFromBackend(backend *Backend) *Model {
+	return &Model{
+		backend:            backend,
+		mode:               ModeBuild,
+		eventCh:            make(chan agent.Event, 128),
+		sessions:           make([]sessionInfo, 0, 8),
+		slashResults:       make([]SlashCommand, 0),
+		commands:           buildCommands(),
+		planModeExclusions: "Write,Edit,Delete,Move,Bash,Shell",
+	}
 }
 
 func setStatus(m *Model, msg string) {
@@ -110,18 +116,6 @@ func buildCommands() []SlashCommand {
 		{Name: "/clear", Description: "清空当前对话", Category: "session"},
 		{Name: "/sessions", Description: "打开会话面板", Category: "session"},
 		{Name: "/set", Description: "打开设置面板", Category: "settings"},
-		{Name: "/plan", Description: "切换到 Plan 只读模式", Category: "action", Action: func(m *Model) {
-			if m.mode == ModeBuild {
-				m.mode = ModePlan
-				setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
-			}
-		}},
-		{Name: "/build", Description: "切换到 Build 可执行模式", Category: "action", Action: func(m *Model) {
-			if m.mode == ModePlan {
-				m.mode = ModeBuild
-				setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
-			}
-		}},
 		{Name: "/help", Description: "显示帮助", Category: "action"},
 	}
 }
@@ -317,16 +311,6 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 		m.refreshSessions()
 	case "/set":
 		m.showSettings = true
-	case "/plan":
-		if m.mode == ModeBuild {
-			m.mode = ModePlan
-			setStatus(m, "PLAN 模式：只读，可搜索/查看文件，不能写入/修改/删除")
-		}
-	case "/build":
-		if m.mode == ModePlan {
-			m.mode = ModeBuild
-			setStatus(m, "BUILD 模式：可执行工具（读写文件、运行命令）")
-		}
 	case "/help":
 		help := strings.Join([]string{
 			"可用命令：",
@@ -335,12 +319,12 @@ func (m *Model) executeCommand(cmd SlashCommand) {
 			"  /branch         复制当前会话",
 			"  /clear          清空对话",
 			"  /sessions       打开会话面板",
-			"  /set            打开设置面板",
+			"  /set            打开设置面板（配置 BUILD/PLAN 模式）",
 			"  /help           显示此帮助",
 			"",
 			"模式说明：",
-			"  BUILD（默认）    AI 可执行工具（读写文件、运行命令）",
-			"  PLAN             AI 只读模式（可搜索、查看文件，不能写入/修改/删除）",
+			"  BUILD（默认）    AI 可执行所有工具",
+			"  PLAN             AI 只读模式，禁用写入类工具",
 			"  按 Tab 切换模式",
 			"",
 			"快捷键：",
@@ -394,7 +378,7 @@ func (m *Model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "esc":
 		m.showSettings = false
 	case "j", "down":
-		if m.settingField < len(m.settingKeys)-1 {
+		if m.settingField < len(m.settingKeys())-1 {
 			m.settingField++
 		}
 	case "k", "up":
@@ -402,10 +386,14 @@ func (m *Model) handleSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingField--
 		}
 	case "enter":
-		m.input = "/set " + m.settingKeys[m.settingField] + " "
+		m.input = "/set " + m.settingKeys()[m.settingField] + " "
 		m.showSettings = false
 	}
 	return m, nil
+}
+
+func (m *Model) settingKeys() []string {
+	return []string{"provider", "model", "base_url", "api_key", "temperature", "max_tokens", "max_iterations", "plan_exclude"}
 }
 
 func (m *Model) sendInput() (tea.Model, tea.Cmd) {
@@ -422,25 +410,31 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/set ") {
 		parts := strings.SplitN(text, " ", 3)
 		if len(parts) >= 3 && parts[2] != "" {
+			field := parts[1]
+			val := parts[2]
 			m.backend.UpdateSettings(func(s *settings.Settings) {
-				updateSettingField(s, parts[1], parts[2])
+				updateSettingField(s, field, val)
 			})
+			// 同步本地状态
+			if field == "plan_exclude" {
+				m.planModeExclusions = val
+			}
 			m.backend.RefreshClients()
 			m.messages = append(m.messages, agent.Event{
 				Type:    agent.EventText,
-				Content: fmt.Sprintf("已更新: %s = %s", parts[1], parts[2]),
+				Content: fmt.Sprintf("已更新: %s = %s", field, val),
 			})
 		}
 		return m, nil
 	}
 
-	// 构建用户消息，Plan 模式下追加只读提示
-	userMsg := text
-	if m.mode == ModePlan {
-		userMsg = text + "\n\n[系统提示：当前为 PLAN 只读模式。你可以搜索代码、查看文件内容，但不能写入、修改或删除任何文件。请在回答中明确说明需要执行的操作，但不实际执行写入操作。]"
-	}
-
 	m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: "你: " + text})
+
+	// Plan 模式下追加禁用工具提示
+	userMsg := text
+	if m.mode == ModePlan && m.planModeExclusions != "" {
+		userMsg = text + fmt.Sprintf("\n\n[系统提示：当前为 PLAN 只读模式。以下工具已禁用：%s。你可以搜索代码、查看文件内容，但不能执行上述工具。请在回答中明确说明需要执行的操作，但不实际执行写入操作。]", m.planModeExclusions)
+	}
 
 	events, err := m.backend.RunAgent(context.Background(), userMsg)
 	if err != nil {
@@ -607,15 +601,28 @@ func (m *Model) viewSessions() string {
 func (m *Model) viewSettings() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(" 设置 ") + "\n\n")
-	for i, key := range m.settingKeys {
+	keys := m.settingKeys()
+	for i, key := range keys {
 		style := baseStyle
 		if i == m.settingField {
 			style = selectedStyle
 		}
-		val := settingValue(m.backend.Settings(), key)
-		b.WriteString(style.Render(fmt.Sprintf(" %-18s %s", key+":", val)) + "\n")
+		val := ""
+		if key == "plan_exclude" {
+			val = m.planModeExclusions
+			if val == "" {
+				val = "(空 = 全部禁用)"
+			}
+		} else {
+			val = settingValue(m.backend.Settings(), key)
+		}
+		label := key
+		if key == "plan_exclude" {
+			label = "PLAN禁用工具"
+		}
+		b.WriteString(style.Render(fmt.Sprintf(" %-18s %s", label+":", val)) + "\n")
 	}
-	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 编辑(自动填充/set命令) · q/esc 关闭"))
+	b.WriteString("\n" + helpStyle.Render(" j/k 移动 · enter 编辑 · q/esc 关闭"))
 	return b.String()
 }
 
