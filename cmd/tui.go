@@ -19,7 +19,11 @@ func NewTUICommand() *cobra.Command {
 启动后即可在终端中与 licode 对话。
 启动 Web 服务器：./licode web`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			model := tui.NewModel()
+			backend, err := tui.NewBackend()
+			if err != nil {
+				return err
+			}
+			model := tui.NewModel(backend)
 			p := tea.NewProgram(model, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				log.Printf("TUI 退出: %v", err)
