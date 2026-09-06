@@ -25,6 +25,7 @@ func cmdNew(m *Model) {
 	m.backend.NewSession()
 	m.clearLines()
 	m.listItems = m.sessionList()
+	m.home = true
 	m.showToast("新会话已创建")
 }
 
@@ -162,6 +163,9 @@ func parseIntVal(s string) (int, bool) {
 }
 
 func (m *Model) modelName() string {
+	if m.backend == nil {
+		return "llm"
+	}
 	s := m.backend.Settings()
 	if s != nil {
 		if s.Model != "" {

@@ -11,7 +11,7 @@ import (
 	"licode/internal/ai"
 )
 
-const Version = "0.0.43"
+const Version = "0.0.44"
 
 type lipglossColor = string
 
@@ -81,7 +81,8 @@ type Model struct {
 	backend *Backend
 	w, h    int
 
-	mode  Mode
+	home bool
+	mode Mode
 	lines []line
 
 	basePath string
@@ -121,13 +122,13 @@ type Model struct {
 func NewModel(backend *Backend) *Model {
 	m := &Model{
 		backend:     backend,
+		home:        true,
 		basePath:    cwd(),
 		events:      make(chan agent.Event, 512),
 		cmdItems:    commandList(),
 		planExclude: "Write,Edit,Delete,Move,Bash,Shell",
 	}
 	m.listItems = m.sessionList()
-	m.replaySession()
 	return m
 }
 
@@ -277,6 +278,22 @@ func (m *Model) keyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.listOpen {
+			if m.listSelected < len(m.listItems) {
+				it := m.listItems[m.listSelected]
+				m.backend.SwitchSession(it.id)
+				m.clearLines()
+				m.replaySession()
+				m.listOpen = false
+			}
+			return m, nil
+		}
+		if m.settingOpen {
+			m.input = "/set " + settingFields[m.settingField] + " "
+			m.settingOpen = false
+			m.cmdMenu = false
+			return m, nil
+		}
 		m.sendInput()
 		return m, nil
 	case "backspace":
@@ -403,6 +420,7 @@ func (m *Model) sendInput() {
 	m.histIdx = -1
 	m.input = ""
 	m.cmdMenu = false
+	m.home = false
 
 	if strings.HasPrefix(text, "/set ") {
 		m.doSetting(text)
@@ -453,57 +471,6 @@ func (m *Model) replaySession() {
 }
 
 // ── 工具显示 ──
-func toolLabel(name, args string) string {
-	base := map[string]string{
-		"bash":       "$",
-		"shell":      "$",
-		"execute":    "$",
-		"glob":       "✱",
-		"grep":       "✱",
-		"read":       "→",
-		"webfetch":   "%",
-		"websearch":  "◈",
-		"write":      "←",
-		"edit":       "←",
-		"apply_patch": "%",
-		"todowrite":  "⚙",
-		"task":       "│",
-		"question":   "→",
-		"skill":      "→",
-	}
-	icon, ok := base[name]
-	if !ok {
-		icon = "⚙"
-	}
-	lower := strings.ToLower(name)
-	var desc string
-	switch {
-	case lower == "bash" || lower == "shell":
-		desc = argsPayload(args)
-		if desc == "" {
-			desc = "(no command)"
-		}
-	case lower == "read":
-		desc = truncate(cleanArg(args, "filePath", "path"), 60)
-	case lower == "glob":
-		desc = `Glob "` + truncate(cleanArg(args, "pattern", "include"), 60) + `"`
-	case lower == "grep":
-		desc = `Grep "` + truncate(cleanArg(args, "pattern", "query"), 60) + `"`
-	case lower == "webfetch":
-		desc = "WebFetch " + truncate(cleanArg(args, "url"), 60)
-	case lower == "websearch":
-		desc = `WebSearch "` + truncate(cleanArg(args, "query"), 60) + `"`
-	case lower == "write" || lower == "edit":
-		desc = "Write/Edit " + truncate(cleanArg(args, "filePath", "path"), 60)
-	default:
-		desc = truncate(argsPayload(args), 80)
-	}
-	if icon == "$" {
-		return "$ " + desc
-	}
-	return icon + " " + desc
-}
-
 func argsPayload(args string) string {
 	args = strings.TrimSpace(args)
 	if args == "" {
@@ -513,43 +480,6 @@ func argsPayload(args string) string {
 		return args[:120] + "..."
 	}
 	return args
-}
-
-func cleanArg(args string, keys ...string) string {
-	args = strings.TrimSpace(args)
-	if strings.HasPrefix(args, "{") {
-		// 尝试粗提取 JSON 字段
-		for _, k := range keys {
-			if v, ok := jsonField(args, k); ok {
-				return v
-			}
-		}
-	}
-	args = strings.TrimPrefix(args, "{")
-	args = strings.TrimSuffix(args, "}")
-	return strings.TrimSpace(args)
-}
-
-func jsonField(s, key string) (string, bool) {
-	idx := strings.Index(s, `"`+key+`"`)
-	if idx < 0 {
-		return "", false
-	}
-	rest := s[idx+len(key)+2:]
-	rest = strings.TrimLeft(rest, " \t\r\n")
-	if strings.HasPrefix(rest, ": ") {
-		rest = rest[2:]
-	} else if strings.HasPrefix(rest, ":") {
-		rest = rest[1:]
-	}
-	rest = strings.TrimLeft(rest, " \t")
-	if strings.HasPrefix(rest, `"`) {
-		end := strings.Index(rest[1:], `"`)
-		if end >= 0 {
-			return rest[1 : 1+end], true
-		}
-	}
-	return "", false
 }
 
 func truncate(s string, n int) string {

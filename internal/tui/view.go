@@ -8,13 +8,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// 忠实复刻 opencode TUI 的会话视图。
-// 屏幕列：外层 paddingLeft=2；消息边框在第 2 列；正文/图标在第 5 列。
-const (
-	colBody     = "     " // 助手正文 / 工具图标
-	colBlockTxt = "     " // 块工具正文
-	colBlockTt  = "        " // 块工具标题
-)
+// 忠实复刻 opencode TUI。
+// 屏幕列：外层 paddingLeft=2；消息/输入框边框在 col2；
+// 用户正文/块正文/工具图标在第 5 列；块标题第 8 列；助手正文 drop 到第 5 列。
+
+const colBody = "     " // 助手正文 / 工具图标 / 内联工具（paddingLeft=3，屏幕从 col2 起 → col5）
 
 type seg struct {
 	text  string
@@ -27,13 +25,15 @@ type row struct {
 	text        string
 	bg          string // 背景色（空 = colorBg）
 	toggle      int    // 可点击切换的工具行下标(-1)
-	borderColor string // 左侧竖线颜色（仅有两端框起时才画）
+	borderColor string // 左侧竖线颜色（有值才画，边框占 col2）
 	top         int    // 上方空行数
 	segs        []seg  // 多段着色（▣ 页脚等）
 }
 
 func (m *Model) View() string {
 	switch {
+	case m.home:
+		return m.viewHome()
 	case m.listOpen:
 		return m.viewList()
 	case m.settingOpen:
@@ -43,25 +43,107 @@ func (m *Model) View() string {
 	}
 }
 
-func (m *Model) viewChat() string {
-	var sb strings.Builder
+// ── 首页（logo + 居中 Prompt） ──
+
+var logoLeft = []string{
+	"                   ",
+	"█▀▀█ █▀▀█ █▀▀█ █▀▀▄",
+	"█__█ █__█ █^^^ █__█",
+	"▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀",
+}
+
+var logoRight = []string{
+	"             ▄     ",
+	"█▀▀▀ █▀▀█ █▀▀█ █▀▀█",
+	"█___ █__█ █__█ █^^^",
+	"▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀",
+}
+
+func (m *Model) viewHome() string {
 	w := m.w
 	if w < 10 {
 		w = 10
 	}
+	var lines []string
 
-	chatH := m.h - 4
-	if chatH < 2 {
-		chatH = 2
+	content := len(logoLeft) + 1 + 1 + len(m.promptLines(0)) // logo + <height1/> + wrapper paddingTop + Prompt
+	top := (m.h - content) / 2
+	if top < 0 {
+		top = 0
+	}
+	for i := 0; i < top; i++ {
+		lines = append(lines, blankLine(w, colorBg))
+	}
+	for i := 0; i < len(logoLeft); i++ {
+		lines = append(lines, m.logoLine(i)...)
+	}
+	lines = append(lines, blankLine(w, colorBg)) // <box height={1}/>
+	lines = append(lines, blankLine(w, colorBg)) // 包装盒 paddingTop
+	lines = append(lines, m.promptLines(w)...)
+	for i := top + content; i < m.h; i++ {
+		lines = append(lines, blankLine(w, colorBg))
+	}
+	if m.toast != "" && top >= 1 {
+		lines[1] = m.toastLine()
+	}
+	return joinLines(lines)
+}
+
+func (m *Model) logoLine(i int) []string {
+	var b strings.Builder
+	for _, ch := range logoLeft[i] {
+		b.WriteString(logoGlyph(ch, colorMuted, false))
+	}
+	b.WriteString(" ")
+	for _, ch := range logoRight[i] {
+		b.WriteString(logoGlyph(ch, colorText, true))
+	}
+	text := b.String()
+	pad := max(0, (m.w-lipgloss.Width(text))/2)
+	tail := max(0, m.w-pad-lipgloss.Width(text))
+	return []string{
+		lipgloss.NewStyle().Background(lipgloss.Color(colorBg)).
+			Render(strings.Repeat(" ", pad) + text + strings.Repeat(" ", tail)),
+	}
+}
+
+// logoGlyph 复刻 opencode logo.tsx 的逐字符渲染：
+// _ → fg+shadow 底的空格；^ → fg+shadow 底的 ▀；~ → shadow 色的 ▀；, → shadow 色的 ▄；其余原样。
+func logoGlyph(ch rune, fg string, bold bool) string {
+	sh := shadowOf(fg)
+	base := lipgloss.NewStyle()
+	if bold {
+		base = base.Bold(true)
+	}
+	switch ch {
+	case '_':
+		return base.Foreground(lipgloss.Color(fg)).Background(lipgloss.Color(sh)).Render(" ")
+	case '^':
+		return base.Foreground(lipgloss.Color(fg)).Background(lipgloss.Color(sh)).Render("▀")
+	case '~':
+		return base.Foreground(lipgloss.Color(sh)).Render("▀")
+	case ',':
+		return base.Foreground(lipgloss.Color(sh)).Render("▄")
+	default:
+		return base.Foreground(lipgloss.Color(fg)).Render(string(ch))
+	}
+}
+
+// ── 会话视图 ──
+
+func (m *Model) viewChat() string {
+	w := m.w
+	if w < 10 {
+		w = 10
+	}
+	prompt := m.promptLines(w)
+	chatH := m.h - len(prompt)
+	if chatH < 1 {
+		chatH = 1
 	}
 
-	// 顶部留白 + 浮动 toast
-	if !m.toastExp.IsZero() && m.toast != "" {
-		sb.WriteString(m.toastLine())
-	} else {
-		sb.WriteString(blankLine(w, colorBg))
-	}
-
+	var lines []string
+	lines = append(lines, blankLine(w, colorBg)) // 顶部 <box height={1}/> 留白
 	rows := m.buildRows()
 	m.rows = nil
 	for i := range rows {
@@ -73,21 +155,27 @@ func (m *Model) viewChat() string {
 		m.rows = m.rows[len(m.rows)-remain:]
 	}
 	for _, r := range rows {
-		sb.WriteString(m.renderRow(r))
-		sb.WriteString("\n")
+		lines = append(lines, m.renderRow(r))
 	}
 	for i := len(rows); i < remain; i++ {
-		sb.WriteString(blankLine(w, colorBg))
+		lines = append(lines, blankLine(w, colorBg))
 	}
+	lines = append(lines, prompt...)
 
-	// Prompt 区块：输入框(+元信息行) / 分隔线 / 状态行
-	sb.WriteString(m.renderInputLine())
-	sb.WriteString("\n")
-	sb.WriteString(m.renderMetaLine())
-	sb.WriteString("\n")
-	sb.WriteString(m.renderSeparator())
-	sb.WriteString("\n")
-	sb.WriteString(m.renderStatusLine())
+	if m.toast != "" {
+		lines[1] = m.toastLine()
+	}
+	return joinLines(lines)
+}
+
+func joinLines(lines []string) string {
+	var sb strings.Builder
+	for i, ln := range lines {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(ln)
+	}
 	return sb.String()
 }
 
@@ -95,12 +183,32 @@ func blankLine(w int, bg string) string {
 	return lipgloss.NewStyle().Background(lipgloss.Color(bg)).Render(strings.Repeat(" ", max(0, w)))
 }
 
+// Prompt 区块：列间隙 / 内盒留白 / 输入行 / 元信息留白 / 元信息行 / 分隔线 / 状态行 / 容器下留白
+func (m *Model) promptLines(w int) []string {
+	return []string{
+		blankLine(w, colorBg),      // 聊天列 gap
+		elementPadLine(w),          // prompt 内盒 paddingTop
+		m.renderInputLine(),        // 输入行
+		elementPadLine(w),          // 元信息行 paddingTop
+		m.renderMetaLine(),         // 元信息行
+		m.renderSeparator(),        // ╹ + ▀
+		m.renderStatusLine(),       // 状态行（含左框 ▍）
+		blankLine(w, colorBg),      // 容器 paddingBottom
+	}
+}
+
+func elementPadLine(w int) string {
+	fill := lipgloss.NewStyle().Background(lipgloss.Color(colorElement)).Render(strings.Repeat(" ", max(0, w-2)))
+	tail := lipgloss.NewStyle().Background(lipgloss.Color(colorBg)).Render("  ")
+	return fill + tail
+}
+
 // ── 消息区 ──
 
 func (m *Model) buildRows() []row {
 	var rows []row
 	maxW := m.chunkMax()
-	first := true // 首条用户消息不另加 margin（顶部留白已占一行）
+	first := true
 	lastInline := false
 
 	for i := range m.lines {
@@ -150,30 +258,33 @@ func (m *Model) buildRows() []row {
 }
 
 func (m *Model) chunkMax() int {
-	w := m.w - 12
-	if w < 40 {
-		w = 40
+	w := m.w - 7
+	if w < 20 {
+		w = 20
 	}
 	return w
 }
 
 func (m *Model) userRows(l *line, first bool, maxW int) []row {
-	rs := wrapRows("", colorText, l.text, maxW)
-	out := make([]row, 0, len(rs))
-	for i, r := range rs {
-		top := 0
-		if !first && i == 0 {
-			top = 1
-		}
-		out = append(out, row{indent: "  ", color: colorText, text: r.text, bg: colorPanel, toggle: -1, borderColor: l.color, top: top})
+	padTop := 0
+	if !first {
+		padTop = 1
 	}
+	rs := wrapRows("", colorText, l.text, maxW)
+	out := make([]row, 0, len(rs)+2)
+	// 边框内 paddingTop/paddingBottom 各占一行（panel 底色 + ▍ 边框）
+	out = append(out, row{indent: "  ", text: "", bg: colorPanel, toggle: -1, borderColor: l.color, top: padTop})
+	for _, r := range rs {
+		out = append(out, row{indent: "  ", color: colorText, text: r.text, bg: colorPanel, toggle: -1, borderColor: l.color})
+	}
+	out = append(out, row{indent: "  ", text: "", bg: colorPanel, toggle: -1, borderColor: l.color})
 	return out
 }
 
 func (m *Model) toolRows(idx int, l *line, lastInline bool, maxW int) []row {
 	icon, desc, blockTitle, maxLines := describeTool(l.tool, l.args)
 
-	// 运行中：spinner + 描述（无图标，与 opencode 一致）
+	// 运行中：spinner + 描述（无图标）
 	if l.running {
 		frame := spinnerFrames[(m.spinnerIdx+idx)%len(spinnerFrames)]
 		top := 0
@@ -185,39 +296,39 @@ func (m *Model) toolRows(idx int, l *line, lastInline bool, maxW int) []row {
 
 	payload := strings.TrimSpace(l.payload)
 
-	// 块工具（输出可见）：左框+面板底色，标题行 + 输出 + 折叠/展开
+	// 块工具（有输出）：▍ 边框 + panel 底色 + 顶/底留白 + 子行间隔
 	if payload != "" {
 		var rs []row
-		top := 1
+		rs = append(rs, row{indent: "  ", text: "", bg: colorPanel, toggle: -1, top: 1, borderColor: colorBg})
 		if blockTitle != "" {
-			rs = append(rs, row{indent: colBlockTt, color: colorMuted, text: blockTitle, bg: colorPanel, toggle: -1, top: top, borderColor: colorBg})
-			top = 0
+			rs = append(rs, row{indent: "  ", color: colorMuted, text: "   " + blockTitle, bg: colorPanel, toggle: -1, borderColor: colorBg})
 		} else if icon == "$" {
-			rs = append(rs, row{indent: colBlockTxt, color: colorText, text: icon + " " + desc, bg: colorPanel, toggle: -1, top: top, borderColor: colorBg})
-			top = 0
+			rs = append(rs, row{indent: "  ", color: colorText, text: icon + " " + desc, bg: colorPanel, toggle: -1, borderColor: colorBg})
 		}
+		rs = append(rs, row{indent: "  ", text: "", bg: colorPanel, toggle: -1, borderColor: colorBg})
 		lines := strings.Split(payload, "\n")
 		overflow := len(lines) > maxLines || len(payload) > maxLines*80
 		if !l.expanded && overflow {
 			lines = lines[:maxLines]
 		}
 		for _, ln := range lines {
-			for _, wr := range wrapRows(colBlockTxt, colorText, ln, maxW) {
-				rs = append(rs, row{indent: colBlockTxt, color: colorText, text: wr.text, bg: colorPanel, toggle: -1, borderColor: colorBg, top: top})
-				top = 0
+			for _, wr := range wrapRows("", colorText, ln, maxW) {
+				rs = append(rs, row{indent: "  ", color: colorText, text: wr.text, bg: colorPanel, toggle: -1, borderColor: colorBg})
 			}
 		}
 		if overflow {
+			rs = append(rs, row{indent: "  ", text: "", bg: colorPanel, toggle: -1, borderColor: colorBg})
 			txt := "Click to expand"
 			if l.expanded {
 				txt = "Click to collapse"
 			}
-			rs = append(rs, row{indent: colBlockTxt, color: colorMuted, text: txt, bg: colorPanel, toggle: idx, borderColor: colorBg})
+			rs = append(rs, row{indent: "  ", color: colorMuted, text: txt, bg: colorPanel, toggle: idx, borderColor: colorBg})
 		}
+		rs = append(rs, row{indent: "  ", text: "", bg: colorPanel, toggle: -1, borderColor: colorBg})
 		return rs
 	}
 
-	// 内联工具行：完成 → 图标+描述（muted）；task/execute 完成 ✓
+	// 内联工具行：完成 → 图标+描述（muted）；task/execute 完成变 ✓
 	ic := icon
 	if l.tool == "task" || l.tool == "execute" {
 		ic = "✓"
@@ -274,12 +385,18 @@ func describeTool(tool, args string) (icon, desc, blockTitle string, maxLines in
 		if p := short(a, "path"); p != "" {
 			desc += " in " + p
 		}
+		if n := str(a, "count"); n != "" {
+			desc += " (" + n + matchWord(n) + ")"
+		}
 		maxLines = 5
 	case "grep":
 		icon = "✱"
 		desc = `Grep "` + short(a, "pattern", "query") + `"`
 		if p := short(a, "path"); p != "" {
 			desc += " in " + p
+		}
+		if n := str(a, "matches"); n != "" {
+			desc += " (" + n + matchWord(n) + ")"
 		}
 		maxLines = 5
 	case "webfetch":
@@ -352,6 +469,13 @@ func describeTool(tool, args string) (icon, desc, blockTitle string, maxLines in
 		maxLines = 3
 	}
 	return icon, desc, blockTitle, maxLines
+}
+
+func matchWord(n string) string {
+	if n == "1" {
+		return " match"
+	}
+	return " matches"
 }
 
 func taskDesc(a map[string]any, args string) string {
@@ -470,11 +594,7 @@ func wrapRows(indent, color, text string, maxW int) []row {
 			continue
 		}
 		for _, chunk := range chunkLines(ln, maxW) {
-			if len(rows) == 0 {
-				rows = append(rows, row{indent: indent, color: color, text: chunk, toggle: -1})
-			} else {
-				rows = append(rows, row{indent: indent, color: color, text: chunk, toggle: -1})
-			}
+			rows = append(rows, row{indent: indent, color: color, text: chunk, toggle: -1})
 		}
 	}
 	if len(rows) == 0 {
@@ -524,9 +644,9 @@ func bgForSelected(i, sel int) string {
 	return ""
 }
 
-// ── 底部 Prompt 区块 ──
+// ── 底部 Prompt ──
 
-// 输入框 + 元信息行（同框，左框 ▍，背景 element）
+// 输入行（leader=以 / 开头时用 muted 色；空时显示占位符）
 func (m *Model) renderInputLine() string {
 	bor := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(borderChar)
 	prefix := "  " + bor + "  "
@@ -535,6 +655,14 @@ func (m *Model) renderInputLine() string {
 		avail = 1
 	}
 	text := m.input
+	val := colorText
+	if strings.HasPrefix(text, "/") {
+		val = colorMuted
+	}
+	if text == "" {
+		text = m.placeholder()
+		val = colorMuted
+	}
 	rs := []rune(text)
 	if lipgloss.Width(text) > avail-1 {
 		for lipgloss.Width(string(rs)) > avail-1 {
@@ -543,67 +671,70 @@ func (m *Model) renderInputLine() string {
 	}
 	line := string(rs) + "▊"
 	fill := lipgloss.NewStyle().Background(lipgloss.Color(colorElement)).
-		Foreground(lipgloss.Color(colorText)).
+		Foreground(lipgloss.Color(val)).
 		Render(line + strings.Repeat(" ", max(0, avail-lipgloss.Width(line))))
 	return prefix + fill + "  "
 }
 
-// 元信息行：agent · model provider（与输入同框背景）
+func (m *Model) placeholder() string {
+	p := []string{
+		`Ask anything… "Fix a TODO in the codebase"`,
+		`Ask anything… "What is the tech stack of this project?"`,
+		`Ask anything… "Fix broken tests"`,
+	}
+	return p[(m.spinnerIdx/7)%len(p)]
+}
+
+// 元信息行：agent · model provider
 func (m *Model) renderMetaLine() string {
 	bor := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(borderChar)
 	prefix := "  " + bor + "  "
 	agent := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(m.mode.String())
-	sep := lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(" · ")
-	model := lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Render(m.modelName())
+	sep := mutedStyle.Render(" · ")
+	model := textStyle.Render(m.modelName())
 	text := agent + sep + model
 	avail := m.w - lipgloss.Width(prefix) - 2
 	fill := lipgloss.NewStyle().Background(lipgloss.Color(colorElement)).Render(text + strings.Repeat(" ", max(1, avail-lipgloss.Width(text))))
 	return prefix + fill + "  "
 }
 
-// 分隔线：╹ + ▀ 填充（backgroundElement 色）
+// 分隔线：╹(left) + ▀ 填充（backgroundElement 色）
 func (m *Model) renderSeparator() string {
 	prefix := "  " + lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render("╹")
 	fill := lipgloss.NewStyle().Foreground(lipgloss.Color(colorElement)).Render(strings.Repeat("▀", max(0, m.w-3)))
 	return prefix + fill
 }
 
-// 状态行：左 cwd / 忙碌时 spinner+esc interrupt；右 快捷键 + 版本
+// 状态行：左 cwd / 运行中 spinner+esc interrupt；右 快捷键
 func (m *Model) renderStatusLine() string {
+	bor := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(borderChar)
+	prefix := "  " + bor
 	var left string
 	if m.busy {
-		frame := statusFrames[(m.spinnerIdx)%len(statusFrames)]
-		left = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Render(frame) + " " +
-			lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Render("esc") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(" interrupt")
+		frame := statusFrames[m.spinnerIdx%len(statusFrames)]
+		frameC := lipgloss.NewStyle().Foreground(lipgloss.Color(m.mode.Color())).Render(frame)
+		left = "  " + frameC + " " + textStyle.Render("esc") + mutedStyle.Render(" interrupt")
 	} else {
 		cwd := m.basePath
 		if cwd == "" {
 			cwd = "~"
 		}
-		left = "  " + lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(cwd)
+		left = "  " + mutedStyle.Render(cwd)
 	}
 
-	right := lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Render("a") +
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(" agents") +
-		"  " +
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Render("Ctrl+p") +
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(" commands") +
-		"  " +
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Render("LiCode") +
-		" " +
-		lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(Version)
+	right := textStyle.Render("a") + mutedStyle.Render(" agents") + "  " +
+		textStyle.Render("Ctrl+p") + mutedStyle.Render(" commands")
 
-	pad := m.w - lipgloss.Width(left) - lipgloss.Width(right)
+	pad := m.w - lipgloss.Width(prefix+left) - lipgloss.Width(right)
 	if pad < 1 {
 		pad = 1
 	}
-	return lipgloss.NewStyle().Background(lipgloss.Color(colorBg)).Render(left + strings.Repeat(" ", pad) + right)
+	return lipgloss.NewStyle().Background(lipgloss.Color(colorBg)).Render(prefix + left + strings.Repeat(" ", pad) + right)
 }
 
 var statusFrames = []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂"}
 
-// 顶部 toast（右对齐浮动）
+// 顶部 toast（右对齐，absolute top=2）
 func (m *Model) toastLine() string {
 	w := m.w
 	msg := m.toast
@@ -651,7 +782,7 @@ func (m *Model) viewSettings() string {
 			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Background(lipgloss.Color(colorElement)).Render("▍ "+label+": "+val) + "\n")
 			hint := m.settingHint(key)
 			if hint != "" {
-				sb.WriteString("     " + lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)).Render(hint) + "\n")
+				sb.WriteString("     " + mutedStyle.Render(hint) + "\n")
 			}
 		} else {
 			sb.WriteString("  " + label + ": " + val + "\n")
