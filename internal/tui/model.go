@@ -166,7 +166,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if m.mode == ModeBuild {
 			m.mode = ModePlan
-			setStatus(m, "PLAN 模式：AI 仅思考，不会执行任何工具（安全预览）")
+			setStatus(m, "PLAN 模式：AI 仅思考，不会执行任何工具")
 		} else {
 			m.mode = ModeBuild
 			setStatus(m, "BUILD 模式：AI 可以读写文件、执行命令")
@@ -415,7 +415,7 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: "你: " + text})
+	m.messages = append(m.messages, agent.Event{Type: agent.EventText, Content: text})
 
 	userMsg := text
 	if m.mode == ModePlan && m.planModeExclusions != "" {
@@ -459,12 +459,12 @@ func (m *Model) View() string {
 func (m *Model) viewChat() string {
 	var b strings.Builder
 
-	// 1. 顶部状态栏
+	// 顶部状态栏
 	b.WriteString(m.viewTopBar())
 	b.WriteString("\n")
 
-	// 2. 聊天内容区（纯文本，无边框）
-	chatH := m.height - 3 // 底部留 2 行：输入框 + 状态栏
+	// 对话内容区（占满上方，纯文本，无边框）
+	chatH := m.height - 3
 	if chatH < 3 {
 		chatH = 3
 	}
@@ -474,29 +474,27 @@ func (m *Model) viewChat() string {
 		lines = lines[len(lines)-chatH:]
 	}
 	for _, l := range lines {
-		b.WriteString(l + "\n")
+		b.WriteString(l)
+		b.WriteString("\n")
 	}
 	for i := len(lines); i < chatH; i++ {
 		b.WriteString("\n")
 	}
 
-	// 3. 输入框（无前缀）
+	// 输入框（无前缀）
 	b.WriteString(m.input)
 	b.WriteString("\n")
 
-	// 4. 底部状态栏
+	// 底部状态栏
 	b.WriteString(m.viewStatusBar())
 
 	return b.String()
 }
 
 func (m *Model) viewTopBar() string {
-	// 左侧：应用名
 	left := " licode "
-	// 右侧：模式指示器
 	modeStr := m.mode.String()
 	right := fmt.Sprintf(" %s ", modeStr)
-	// 填充中间
 	spaces := m.width - len(left) - len(right)
 	if spaces < 1 {
 		spaces = 1
@@ -509,11 +507,8 @@ func (m *Model) renderMessages() string {
 	for _, evt := range m.messages {
 		switch evt.Type {
 		case agent.EventText:
-			if strings.HasPrefix(evt.Content, "你: ") {
-				msgs = append(msgs, userMsgStyle.Render("你: ")+evt.Content[3:])
-			} else {
-				msgs = append(msgs, aiMsgStyle.Render("AI: ")+evt.Content)
-			}
+			// 纯文本，无前缀
+			msgs = append(msgs, evt.Content)
 		case agent.EventToolStart:
 			msgs = append(msgs, toolStyle.Render(fmt.Sprintf("$ %s(%s)", evt.ToolName, evt.ToolArgs)))
 		case agent.EventToolDone:
@@ -538,7 +533,7 @@ func (m *Model) viewStatusBar() string {
 	}
 	size := "1.2 MB"
 	tip := "Ctrl+p commands"
-	ver := "0.0.34"
+	ver := "0.0.36"
 	return dir + "  " + size + "  " + tip + "  " + "LiCode " + ver
 }
 
